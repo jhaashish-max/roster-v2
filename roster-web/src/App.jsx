@@ -49,7 +49,7 @@ import ShiftConfigModal from './components/ShiftConfigModal';
 import AgentAvailability from './components/AgentAvailability';
 import MiscSettings from './components/MiscSettings';
 import { format, startOfMonth, endOfMonth, eachDayOfInterval, addMonths, subMonths, isWeekend, isAfter, isBefore, parseISO, startOfDay, isSameDay } from 'date-fns';
-import { fetchRoster, fetchAllTeamsRoster, checkRosterExists, deleteRoster, updateRosterEntry, getTeams, createTeam, updateTeam, deleteTeam, isLoggedIn, getUserEmail, logout as authLogout, handleAuthCallback, checkAdmin, listAdmins, addAdmin, removeAdmin, whoAmI, createLeaveRequest, getMyRequests, getPendingRequests, reviewRequest, getTeamEmails, updateTeamEmails, getShiftConfigs, saveShiftConfigs, deleteShiftConfig, getDepartments, createDepartment, getDepartmentMembers, getShiftLegends, saveShiftLegends } from './lib/api';
+import { fetchRoster, fetchAllTeamsRoster, checkRosterExists, deleteRoster, updateRosterEntry, getTeams, createTeam, updateTeam, deleteTeam, isLoggedIn, getUserEmail, logout as authLogout, handleAuthCallback, checkAdmin, listAdmins, addAdmin, removeAdmin, whoAmI, createLeaveRequest, getMyRequests, getPendingRequests, reviewRequest, getTeamEmails, updateTeamEmails, getShiftConfigs, saveShiftConfigs, deleteShiftConfig, getDepartments, createDepartment, getDepartmentMembers, getShiftLegends, saveShiftLegends, updateDepartment } from './lib/api';
 import { getAvatarColor } from './lib/utils';
 
 // N8n Webhook URL - Using Vite proxy to bypass CORS in Dev, Direct URL in Prod
@@ -2653,6 +2653,13 @@ function AuthenticatedApp({ onLogout }) {
     }).catch(() => setUserProfile(null));
   }, []);
 
+  // Refresh departments when features are toggled in MiscSettings
+  useEffect(() => {
+    const handler = () => loadDepartments();
+    window.addEventListener('departmentFeaturesUpdated', handler);
+    return () => window.removeEventListener('departmentFeaturesUpdated', handler);
+  }, []);
+
   const loadDepartments = async () => {
     try {
       const data = await getDepartments();
@@ -2923,7 +2930,7 @@ function AuthenticatedApp({ onLogout }) {
               <CheckSquare size={20} /> {!sidebarCollapsed && 'Approvals'}
             </button>
           )}
-          {isAdmin && (
+          {isAdmin && selectedDepartmentId && (departments.find(d => d.id === selectedDepartmentId)?.features || []).includes('auto_bucket') && (
             <button
               className={`nav-item ${view === 'auto-enablement' ? 'active' : ''}`}
               onClick={() => setView('auto-enablement')}
@@ -3102,6 +3109,7 @@ function AuthenticatedApp({ onLogout }) {
             <MiscSettings
               departmentId={selectedDepartmentId}
               departmentName={departments.find(d => d.id === selectedDepartmentId)?.name}
+              departments={departments}
             />
           )}
         </main>

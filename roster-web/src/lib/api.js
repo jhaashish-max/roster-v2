@@ -144,6 +144,16 @@ export async function createDepartment(name, slug) {
     return data;
 }
 
+export async function updateDepartment(id, updates) {
+    const res = await authFetch('/api/departments', {
+        method: 'PUT',
+        body: JSON.stringify({ id, ...updates })
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error);
+    return data;
+}
+
 export async function getDepartmentMembers(departmentId) {
     const res = await authFetch(`/api/departments/members?department_id=${departmentId}`);
     const data = await res.json();

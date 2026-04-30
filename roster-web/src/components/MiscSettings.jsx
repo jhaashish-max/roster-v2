@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
-import { Plus, Trash2, Save, Loader2, Palette, AlertCircle, Building2 } from 'lucide-react';
-import { getShiftLegends, saveShiftLegends } from '../lib/api';
+import { Plus, Trash2, Save, Loader2, Palette, AlertCircle, Building2, ToggleLeft, ToggleRight } from 'lucide-react';
+import { getShiftLegends, saveShiftLegends, updateDepartment } from '../lib/api';
 
 const DEFAULT_LEGENDS = [
   { status_code: 'WO',   label: 'Week Off',      color: '#374151', text_color: '#ffffff', is_holiday: false },
@@ -11,10 +11,16 @@ const DEFAULT_LEGENDS = [
   { status_code: 'HL',   label: 'Holiday',       color: '#D97706', text_color: '#ffffff', is_holiday: true  },
 ];
 
-export default function MiscSettings({ departmentId, departmentName }) {
+const AVAILABLE_FEATURES = [
+  { key: 'auto_bucket', label: 'Auto Bucket Management', description: 'Automatically enable/disable Freshdesk agent availability based on shift timings' },
+];
+
+export default function MiscSettings({ departmentId, departmentName, departments }) {
   const [legends, setLegends] = useState([]);
+  const [features, setFeatures] = useState([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [savingFeatures, setSavingFeatures] = useState(false);
   const [toast, setToast] = useState(null);
 
   const showToast = (message, type = 'success') => {
@@ -30,12 +36,14 @@ export default function MiscSettings({ departmentId, departmentName }) {
         setLegends(data.length > 0 ? data : DEFAULT_LEGENDS.map(d => ({ ...d, id: null })));
       } catch (err) {
         setLegends(DEFAULT_LEGENDS.map(d => ({ ...d, id: null })));
-      } finally {
-        setLoading(false);
       }
+      // Load features from department
+      const dept = departments?.find(d => d.id === departmentId);
+      setFeatures(dept?.features || []);
+      setLoading(false);
     };
     load();
-  }, [departmentId]);
+  }, [departmentId, departments]);
 
   const handleAdd = () => {
     setLegends(prev => [...prev, {
@@ -76,6 +84,25 @@ export default function MiscSettings({ departmentId, departmentName }) {
       showToast(err.message || 'Failed to save', 'error');
     } finally {
       setSaving(false);
+    }
+  };
+
+  const handleFeatureToggle = async (featureKey) => {
+    const newFeatures = features.includes(featureKey)
+      ? features.filter(f => f !== featureKey)
+      : [...features, featureKey];
+
+    setSavingFeatures(true);
+    try {
+      await updateDepartment(departmentId, { features: newFeatures });
+      setFeatures(newFeatures);
+      // Signal global refresh so sidebar updates
+      window.dispatchEvent(new CustomEvent('departmentFeaturesUpdated'));
+      showToast(`${featureKey === 'auto_bucket' ? 'Auto Bucket Management' : featureKey} ${newFeatures.includes(featureKey) ? 'enabled' : 'disabled'}`);
+    } catch (err) {
+      showToast(err.message || 'Failed to update features', 'error');
+    } finally {
+      setSavingFeatures(false);
     }
   };
 
@@ -278,6 +305,55 @@ export default function MiscSettings({ departmentId, departmentName }) {
           {saving ? <Loader2 size={16} className="spin" /> : <Save size={16} />}
           {saving ? 'Saving…' : 'Save Legends'}
         </button>
+      </div>
+
+      {/* ============ FEATURES SECTION ============ */}
+      <div style={{ marginTop: '3rem' }}>
+        <h1 style={{ fontSize: '1.5rem', fontWeight: 700, color: 'var(--text-primary)', marginBottom: '0.4rem' }}>
+          <ToggleRight size={22} style={{ display: 'inline', marginRight: '0.5rem', color: 'var(--accent-primary)' }} />
+          Department Features
+        </h1>
+        <p style={{ fontSize: '0.85rem', color: 'var(--text-muted)', marginBottom: '1.5rem' }}>
+          Enable or disable features for this department. Only enabled features will appear in the sidebar.
+        </p>
+
+        <div style={{ background: 'var(--bg-card)', borderRadius: '10px', border: '1px solid var(--border-color)', overflow: 'hidden' }}>
+          {AVAILABLE_FEATURES.map(feat => {
+            const isEnabled = features.includes(feat.key);
+            return (
+              <div key={feat.key} style={{
+                display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                padding: '1rem 1.5rem',
+                borderBottom: '1px solid var(--border-color)'
+              }}>
+                <div>
+                  <div style={{ fontSize: '0.9rem', fontWeight: 600, color: 'var(--text-primary)' }}>{feat.label}</div>
+                  <div style={{ fontSize: '0.78rem', color: 'var(--text-muted)', marginTop: '0.2rem' }}>{feat.description}</div>
+                </div>
+                <button
+                  onClick={() => handleFeatureToggle(feat.key)}
+                  disabled={savingFeatures}
+                  style={{
+                    display: 'flex', alignItems: 'center', gap: '0.5rem',
+                    background: isEnabled ? 'var(--accent-primary)' : 'var(--bg-secondary)',
+                    color: isEnabled ? '#fff' : 'var(--text-muted)',
+                    border: `1px solid ${isEnabled ? 'var(--accent-primary)' : 'var(--border-color)'}`,
+                    borderRadius: '20px',
+                    padding: '0.4rem 1rem',
+                    fontSize: '0.8rem',
+                    fontWeight: 600,
+                    cursor: savingFeatures ? 'not-allowed' : 'pointer',
+                    opacity: savingFeatures ? 0.7 : 1,
+                    transition: 'all 0.15s ease'
+                  }}
+                >
+                  {isEnabled ? <ToggleRight size={14} /> : <ToggleLeft size={14} />}
+                  {isEnabled ? 'Enabled' : 'Disabled'}
+                </button>
+              </div>
+            );
+          })}
+        </div>
       </div>
     </div>
   );
