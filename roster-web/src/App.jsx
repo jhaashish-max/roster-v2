@@ -1099,15 +1099,13 @@ const AdminManager = ({ onClose, departments, userRole }) => {
   const roleLabel = (role) => {
     if (role === 'platform_admin') return 'Super Admin';
     if (role === 'dept_admin') return 'Dept Admin';
-    if (role === 'dept_lead') return 'Dept Lead';
     return role;
   };
 
   const roleBadge = (role) => {
     const colors = {
       platform_admin: { bg: '#dbeafe', color: '#1d4ed8' },
-      dept_admin: { bg: '#fef3c7', color: '#92400e' },
-      dept_lead: { bg: '#d1fae5', color: '#065f46' }
+      dept_admin: { bg: '#fef3c7', color: '#92400e' }
     };
     const c = colors[role] || { bg: 'var(--bg-hover)', color: 'var(--text-secondary)' };
     return (
@@ -1166,7 +1164,6 @@ const AdminManager = ({ onClose, departments, userRole }) => {
               >
                 {isPlatformAdmin && <option value="platform_admin">Super Admin</option>}
                 <option value="dept_admin">Dept Admin</option>
-                <option value="dept_lead">Dept Lead</option>
               </select>
               {selectedRole !== 'platform_admin' && (
                 <select
