@@ -1032,12 +1032,18 @@ const DeleteConfirm = ({ onClose, onConfirm, currentDate, deleting, teams = [], 
 };
 
 // Admin Manager Modal
-const AdminManager = ({ onClose, departments }) => {
+const AdminManager = ({ onClose, departments, userRole }) => {
+  const isPlatformAdmin = userRole?.isPlatformAdmin;
+  const adminDeptIds = (userRole?.departments || []).map(d => d.id);
+  const managedDepts = isPlatformAdmin
+    ? departments
+    : departments.filter(d => adminDeptIds.includes(d.id));
+
   const [admins, setAdmins] = useState([]);
   const [loading, setLoading] = useState(true);
   const [newEmail, setNewEmail] = useState('');
-  const [selectedRole, setSelectedRole] = useState('platform_admin');
-  const [selectedDept, setSelectedDept] = useState('');
+  const [selectedRole, setSelectedRole] = useState(isPlatformAdmin ? 'platform_admin' : 'dept_admin');
+  const [selectedDept, setSelectedDept] = useState(managedDepts.length === 1 ? managedDepts[0].id : '');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
 
@@ -1158,7 +1164,7 @@ const AdminManager = ({ onClose, departments }) => {
                 className="form-input"
                 style={{ flex: 1 }}
               >
-                <option value="platform_admin">Super Admin</option>
+                {isPlatformAdmin && <option value="platform_admin">Super Admin</option>}
                 <option value="dept_admin">Dept Admin</option>
                 <option value="dept_lead">Dept Lead</option>
               </select>
@@ -1170,7 +1176,7 @@ const AdminManager = ({ onClose, departments }) => {
                   style={{ flex: 1 }}
                 >
                   <option value="">Select department...</option>
-                  {(departments || []).map(d => (
+                  {managedDepts.map(d => (
                     <option key={d.id} value={d.id}>{d.name}</option>
                   ))}
                 </select>
@@ -3140,6 +3146,7 @@ function AuthenticatedApp({ onLogout }) {
         <AdminManager
           onClose={() => setShowAdminManager(false)}
           departments={departments}
+          userRole={userRole}
         />
       )}
 
