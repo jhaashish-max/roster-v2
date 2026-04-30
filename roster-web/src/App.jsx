@@ -1469,19 +1469,21 @@ const TeamSettings = ({ onClose, onTeamsChange, departmentId }) => {
     setSaving(true);
 
     const membersArray = [];
-    const emailUpdates = [];
 
     formMembers.split('\n').forEach(line => {
       const parts = line.split(',');
       if (parts.length > 0) {
         const name = parts[0].trim();
         if (name) {
-          membersArray.push(name);
           if (parts.length > 1) {
             const email = parts[1].trim();
             if (email) {
-              emailUpdates.push({ name, email });
+              membersArray.push({ name, email });
+            } else {
+              membersArray.push(name);
             }
+          } else {
+            membersArray.push(name);
           }
         }
       }
@@ -1496,10 +1498,6 @@ const TeamSettings = ({ onClose, onTeamsChange, departmentId }) => {
           members: membersArray,
           custom_prompt: formPrompt || null
         });
-      }
-
-      if (emailUpdates.length > 0) {
-        await updateTeamEmails(emailUpdates);
       }
 
       await loadTeams();
