@@ -1,0 +1,17 @@
+name = "roster-api-v2"
+main = "src/index.js"
+compatibility_date = "2024-09-23"
+compatibility_flags = [ "nodejs_compat" ]
+
+# Secrets to set via: wrangler secret put <KEY>
+# SUPABASE_URL            = https://epeknahsozkhymvkgqdm.supabase.co
+# SUPABASE_ANON_KEY        = (set via wrangler secret put)
+# SUPABASE_SERVICE_ROLE_KEY = (set via wrangler secret put — from Supabase Dashboard → Settings → API)
+# PUSHER_KEY               = e517a00f27b50205b1e7
+# PUSHER_SECRET             = 1f0b343cdb029943833f
+# PUSHER_APP_ID             = 1947231
+# PUSHER_CLUSTER            = us2
+# FRESHDESK_AUTH_TOKEN      = (set via wrangler secret put)
+#
+# NOT NEEDED (handled by n8n):
+# GEMINI_API_KEY — AI generation is on the n8n side, not in this worker
