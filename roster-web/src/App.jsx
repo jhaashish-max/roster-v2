@@ -38,7 +38,9 @@ import {
   HelpCircle,
   Phone,
   Building2,
-  Palette
+  Palette,
+  MessageSquare,
+  Hash
 } from 'lucide-react';
 import CellEditor from './components/CellEditor';
 import Summary from './components/Summary';
@@ -58,6 +60,25 @@ const IS_DEV = import.meta.env.DEV;
 const BASE_URL = IS_DEV ? '/api/n8n' : 'https://n8n-conc.razorpay.com';
 
 const N8N_WEBHOOK_URL = `${BASE_URL}/webhook/Roster-gen-v2`;
+
+// DevRev config
+const DEVREV_TOKEN = import.meta.env.VITE_DEVREV_TOKEN || '';
+const DEVREV_SPRINT_ID = import.meta.env.VITE_DEVREV_SPRINT_ID || 'don:core:dvrv-in-1:devo/2sRI6Hepzz:vista/2908:vista_group_item/7226';
+const DEVREV_ORG = import.meta.env.VITE_DEVREV_ORG || 'razorpay';
+
+// Slack config
+const SLACK_BOT_TOKEN = import.meta.env.VITE_SLACK_BOT_TOKEN || '';
+const SLACK_SEARCH_HANDLE = import.meta.env.VITE_SLACK_SEARCH_HANDLE || 'ps-pos-tech-oncall';
+const SLACK_WORKSPACE = import.meta.env.VITE_SLACK_WORKSPACE || 'razorpay';
+// Optional: pre-set the subteam ID to avoid needing usergroups:read scope
+// Slack encodes @handle mentions as <!subteam^ID> — no handle name — so we must match by ID
+const SLACK_SUBTEAM_ID = import.meta.env.VITE_SLACK_SUBTEAM_ID || '';
+// Comma-separated Slack channel IDs to scan e.g. C12345,C67890
+const SLACK_CHANNEL_IDS = (import.meta.env.VITE_SLACK_CHANNEL_IDS || '')
+  .split(',').map(s => s.trim()).filter(Boolean);
+// In dev: Vite proxies /api/slack → https://slack.com/api (bypasses CORS)
+// In prod: Cloudflare Worker at VITE_API_BASE_URL must proxy /api/slack → https://slack.com/api
+const SLACK_API_BASE = IS_DEV ? '/api/slack' : `${import.meta.env.VITE_API_BASE_URL}/api/slack`;
 
 // Default prompt template for roster generation
 const DEFAULT_PROMPT = `You are a Roster Manager. Generate a JSON schedule for the '{{TEAM_NAME}}' team for {{MONTH_NAME}} {{YEAR}}.
@@ -845,6 +866,531 @@ const RosterTable = ({ rosterData, currentDate, onChangeDate, isAdmin, loading, 
           ))}
         </div>
       )}
+    </div>
+  );
+};
+
+// ─── DEVREV TICKETS MODAL ──────────────────────────────────
+const DEVREV_STATUS_STYLES = {
+  triage:      { bg: '#f3f4f6', color: '#6b7280', label: 'Triage' },
+  open:        { bg: '#dbeafe', color: '#1d4ed8', label: 'Open' },
+  in_progress: { bg: '#fef3c7', color: '#d97706', label: 'In Progress' },
+  in_review:   { bg: '#ede9fe', color: '#7c3aed', label: 'In Review' },
+  completed:   { bg: '#d1fae5', color: '#059669', label: 'Done' },
+  done:        { bg: '#d1fae5', color: '#059669', label: 'Done' },
+  wont_fix:    { bg: '#f3f4f6', color: '#6b7280', label: "Won't Fix" },
+  archived:    { bg: '#f3f4f6', color: '#6b7280', label: 'Archived' },
+};
+
+const DEVREV_PRIORITY_STYLES = {
+  p0: { bg: '#fef2f2', color: '#dc2626', label: 'P0' },
+  p1: { bg: '#fff7ed', color: '#ea580c', label: 'P1' },
+  p2: { bg: '#fefce8', color: '#ca8a04', label: 'P2' },
+  p3: { bg: '#eff6ff', color: '#2563eb', label: 'P3' },
+  p4: { bg: '#f9fafb', color: '#6b7280', label: 'P4' },
+};
+
+const DevRevTicketsModal = ({ onClose }) => {
+  const [tickets, setTickets] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+  const [search, setSearch] = useState('');
+  const [collapsedGroups, setCollapsedGroups] = useState({});
+
+  const fetchAllTickets = useCallback(async () => {
+    setLoading(true);
+    setError('');
+    try {
+      let allWorks = [];
+      let cursor = null;
+      do {
+        const params = new URLSearchParams();
+        params.append('type', 'issue');
+        params.append('issue.sprint', DEVREV_SPRINT_ID);
+        params.append('limit', '100');
+        if (cursor) params.append('cursor', cursor);
+
+        const res = await fetch(`https://api.devrev.ai/works.list?${params.toString()}`, {
+          headers: { 'Authorization': `Bearer ${DEVREV_TOKEN}` },
+        });
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}));
+          throw new Error(err.message || `DevRev API error ${res.status}`);
+        }
+        const data = await res.json();
+        allWorks = allWorks.concat(data.works || []);
+        cursor = data.next_cursor || null;
+        if (allWorks.length >= 500) break;
+      } while (cursor);
+      setTickets(allWorks);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => { fetchAllTickets(); }, [fetchAllTickets]);
+
+  const filtered = useMemo(() => {
+    if (!search.trim()) return tickets;
+    const q = search.toLowerCase();
+    return tickets.filter(t =>
+      t.title?.toLowerCase().includes(q) ||
+      t.display_id?.toLowerCase().includes(q)
+    );
+  }, [tickets, search]);
+
+  const grouped = useMemo(() => {
+    const map = {};
+    filtered.forEach(t => {
+      const owners = t.owned_by?.length
+        ? t.owned_by
+        : [{ id: '__unassigned__', display_name: 'Unassigned' }];
+      owners.forEach(owner => {
+        const key = owner.id || '__unassigned__';
+        if (!map[key]) map[key] = { name: owner.display_name || owner.full_name || 'Unassigned', items: [] };
+        map[key].items.push(t);
+      });
+    });
+    return Object.entries(map).sort(([, a], [, b]) => b.items.length - a.items.length);
+  }, [filtered]);
+
+  const toggleGroup = (key) =>
+    setCollapsedGroups(prev => ({ ...prev, [key]: !prev[key] }));
+
+  const ticketUrl = (displayId) =>
+    `https://app.devrev.ai/${DEVREV_ORG}/works/${displayId}`;
+
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div
+        className="modal-content"
+        onClick={e => e.stopPropagation()}
+        style={{ maxWidth: '820px', width: '95vw', maxHeight: '90vh', display: 'flex', flexDirection: 'column', padding: 0 }}
+      >
+        {/* Header */}
+        <div className="modal-header" style={{ padding: '1rem 1.25rem', flexShrink: 0 }}>
+          <h2 style={{ fontSize: '1.1rem', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+            <Briefcase size={18} />
+            DevRev Tickets
+            {!loading && (
+              <span style={{ fontSize: '0.78rem', fontWeight: 400, color: 'var(--text-muted)', marginLeft: '0.25rem' }}>
+                {tickets.length} issues · grouped by assignee
+              </span>
+            )}
+          </h2>
+          <div style={{ display: 'flex', gap: '0.4rem', alignItems: 'center' }}>
+            <button
+              onClick={fetchAllTickets}
+              title="Refresh"
+              style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-muted)', display: 'flex', alignItems: 'center' }}
+            >
+              <RefreshCw size={15} className={loading ? 'spin' : ''} />
+            </button>
+            <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-muted)', display: 'flex', alignItems: 'center' }}>
+              <X size={20} />
+            </button>
+          </div>
+        </div>
+
+        {/* Error */}
+        {error && (
+          <div style={{ margin: '0 1.25rem 0.5rem', padding: '0.5rem 0.75rem', background: '#fef2f2', color: '#dc2626', borderRadius: '6px', fontSize: '0.8rem', flexShrink: 0 }}>
+            <AlertCircle size={14} style={{ verticalAlign: 'middle', marginRight: '4px' }} /> {error}
+          </div>
+        )}
+
+        {/* Search */}
+        <div style={{ padding: '0 1.25rem 0.75rem', flexShrink: 0 }}>
+          <input
+            className="form-input"
+            value={search}
+            onChange={e => setSearch(e.target.value)}
+            placeholder="Search by title or ID…"
+            style={{ width: '100%', fontSize: '0.85rem' }}
+          />
+        </div>
+
+        {/* Body */}
+        <div style={{ overflow: 'auto', flex: 1, padding: '0 1.25rem 1.25rem' }}>
+          {loading ? (
+            <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', padding: '3rem', color: 'var(--text-muted)' }}>
+              <Loader2 size={24} className="spin" />
+            </div>
+          ) : grouped.length === 0 ? (
+            <div style={{ textAlign: 'center', padding: '3rem', color: 'var(--text-muted)', fontSize: '0.9rem' }}>
+              No tickets found
+            </div>
+          ) : (
+            grouped.map(([key, group]) => (
+              <div key={key} style={{ marginBottom: '0.75rem' }}>
+                <button
+                  onClick={() => toggleGroup(key)}
+                  style={{
+                    display: 'flex', alignItems: 'center', gap: '0.5rem',
+                    width: '100%', padding: '0.5rem 0.6rem',
+                    background: 'var(--bg-hover)', border: 'none', borderRadius: '6px',
+                    cursor: 'pointer', textAlign: 'left',
+                    color: 'var(--text-primary)', fontWeight: 600, fontSize: '0.88rem',
+                  }}
+                >
+                  {collapsedGroups[key] ? <ChevronRight size={15} /> : <ChevronDown size={15} />}
+                  <span style={{ flex: 1 }}>{group.name}</span>
+                  <span style={{
+                    fontSize: '0.72rem', fontWeight: 600, color: 'var(--text-muted)',
+                    background: 'var(--bg-secondary)', padding: '0.1rem 0.45rem', borderRadius: '10px',
+                  }}>
+                    {group.items.length}
+                  </span>
+                </button>
+
+                {!collapsedGroups[key] && (
+                  <div style={{ borderLeft: '2px solid var(--border-color)', marginLeft: '0.6rem' }}>
+                    {group.items.map(ticket => {
+                      const stageKey = (ticket.stage?.name || '')
+                        .toLowerCase().replace(/ /g, '_');
+                      const priority = (ticket.priority || 'p4').toLowerCase();
+                      const statusStyle = DEVREV_STATUS_STYLES[stageKey] || DEVREV_STATUS_STYLES.open;
+                      const priorityStyle = DEVREV_PRIORITY_STYLES[priority] || DEVREV_PRIORITY_STYLES.p4;
+
+                      return (
+                        <div
+                          key={ticket.id}
+                          style={{
+                            display: 'flex', alignItems: 'center', gap: '0.75rem',
+                            padding: '0.55rem 0.75rem',
+                            borderBottom: '1px solid var(--border-color)',
+                          }}
+                        >
+                          <a
+                            href={ticketUrl(ticket.display_id)}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            style={{ color: 'var(--text-muted)', fontSize: '0.72rem', fontFamily: 'monospace', flexShrink: 0, textDecoration: 'none', whiteSpace: 'nowrap' }}
+                          >
+                            {ticket.display_id}
+                          </a>
+                          <a
+                            href={ticketUrl(ticket.display_id)}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            style={{ flex: 1, color: 'var(--text-primary)', fontSize: '0.83rem', textDecoration: 'none', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+                            title={ticket.title}
+                          >
+                            {ticket.title}
+                          </a>
+                          <div style={{ display: 'flex', gap: '0.3rem', flexShrink: 0 }}>
+                            <span style={{ padding: '0.12rem 0.4rem', borderRadius: '4px', fontSize: '0.68rem', fontWeight: 700, background: priorityStyle.bg, color: priorityStyle.color }}>
+                              {priorityStyle.label}
+                            </span>
+                            <span style={{ padding: '0.12rem 0.4rem', borderRadius: '4px', fontSize: '0.68rem', fontWeight: 500, background: statusStyle.bg, color: statusStyle.color }}>
+                              {statusStyle.label}
+                            </span>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            ))
+          )}
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// ─── SLACK THREADS MODAL ──────────────────────────────────
+function slackStripMarkup(text) {
+  return (text || '')
+    .replace(/<!subteam\^[A-Z0-9]+\|([^>]+)>/g, '@$1')
+    .replace(/<@[A-Z0-9]+\|([^>]+)>/g, '@$1')
+    .replace(/<@[A-Z0-9]+>/g, '@user')
+    .replace(/<#[A-Z0-9]+\|([^>]+)>/g, '#$1')
+    .replace(/<([^|>]+)\|([^>]+)>/g, '$2')
+    .replace(/<([^>]+)>/g, '$1')
+    .replace(/\n+/g, ' ')
+    .trim();
+}
+
+// Module-level fetch with auto-retry on rate limit
+async function slackGet(endpoint, params = {}, attempt = 0) {
+  const qs = new URLSearchParams(params);
+  const res = await fetch(`${SLACK_API_BASE}/${endpoint}?${qs}`, {
+    headers: { 'Authorization': `Bearer ${SLACK_BOT_TOKEN}` },
+  });
+  if (res.status === 429) {
+    if (attempt >= 3) throw new Error('ratelimited after retries');
+    const wait = parseInt(res.headers.get('Retry-After') || '5', 10);
+    await new Promise(r => setTimeout(r, (wait + 1) * 1000));
+    return slackGet(endpoint, params, attempt + 1);
+  }
+  const data = await res.json();
+  if (!data.ok && data.error === 'ratelimited') {
+    if (attempt >= 3) throw new Error('ratelimited after retries');
+    await new Promise(r => setTimeout(r, 5000));
+    return slackGet(endpoint, params, attempt + 1);
+  }
+  if (!data.ok) throw new Error(data.error || `Slack error: ${endpoint}`);
+  return data;
+}
+
+const SlackThreadsModal = ({ onClose }) => {
+  const [messages, setMessages] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [status, setStatus] = useState('Fetching channel list…');
+  const [errors, setErrors] = useState([]);
+  const [search, setSearch] = useState('');
+
+  const scanChannels = useCallback(async () => {
+    setLoading(true);
+    setErrors([]);
+    setMessages([]);
+
+    if (SLACK_CHANNEL_IDS.length === 0) {
+      setErrors(['No channels configured. Add VITE_SLACK_CHANNEL_IDS to your .env file.']);
+      setLoading(false);
+      return;
+    }
+
+    setStatus(`Resolving @${SLACK_SEARCH_HANDLE}…`);
+    try {
+      // 0. Resolve subteam ID — Slack API encodes mentions as <!subteam^ID> with no handle name
+      let subteamId = SLACK_SUBTEAM_ID;
+      if (!subteamId) {
+        try {
+          const ugData = await slackGet('usergroups.list');
+          const group = (ugData.usergroups || []).find(g => g.handle === SLACK_SEARCH_HANDLE);
+          subteamId = group?.id || '';
+        } catch { /* usergroups:read scope may be missing — will fall back to handle name */ }
+      }
+      // Match either by subteam ID tag or by handle name (fallback)
+      const mentionsHandle = (text) => {
+        if (!text) return false;
+        if (subteamId && text.includes(`<!subteam^${subteamId}>`)) return true;
+        return text.includes(SLACK_SEARCH_HANDLE);
+      };
+
+      // 1. Resolve channel IDs → names
+      setStatus(`Fetching info for ${SLACK_CHANNEL_IDS.length} channel(s)…`);
+      const channels = await Promise.all(SLACK_CHANNEL_IDS.map(async (id) => {
+        try {
+          const data = await slackGet('conversations.info', { channel: id });
+          return data.channel;
+        } catch {
+          return { id, name: id, is_private: false };
+        }
+      }));
+
+      // 2. Scan each channel — paginate history, then check thread replies
+      const oldest = String(Math.floor(Date.now() / 1000) - 30 * 24 * 3600);
+      const allMatches = [];
+      const scanErrors = [];
+
+      for (let i = 0; i < channels.length; i++) {
+        const ch = channels[i];
+        try {
+          let cursor;
+          let page = 0;
+          do {
+            page++;
+            setStatus(`Scanning #${ch.name} (${i + 1}/${channels.length})${page > 1 ? ` p${page}` : ''}…`);
+            const params = { channel: ch.id, oldest, limit: '200' };
+            if (cursor) params.cursor = cursor;
+            const data = await slackGet('conversations.history', params);
+            const topLevel = data.messages || [];
+            console.log(`[Slack] #${ch.name} p${page}: ${topLevel.length} msgs`);
+
+            // Top-level mentions
+            topLevel
+              .filter(m => mentionsHandle(m.text) && m.type === 'message' && !m.subtype)
+              .forEach(m => allMatches.push({ ...m, _channel: ch, _inThread: false }));
+
+            // Check thread replies for any message that has replies
+            const threaded = topLevel.filter(m => (m.reply_count || 0) > 0);
+            console.log(`[Slack] #${ch.name} p${page}: ${threaded.length} threaded msgs`);
+            for (const parent of threaded) {
+              try {
+                // No oldest filter here — fetch all replies in the thread
+                const rd = await slackGet('conversations.replies', { channel: ch.id, ts: parent.ts, limit: '200' });
+                // replies[0] is the parent itself — skip it
+                const replies = (rd.messages || []).slice(1);
+                const matchCount = replies.filter(m => mentionsHandle(m.text)).length;
+                console.log(`[Slack] #${ch.name} thread ts=${parent.ts}: ${replies.length} replies, matches=${matchCount}`);
+                replies
+                  .filter(m => mentionsHandle(m.text))
+                  .forEach(m => allMatches.push({ ...m, _channel: ch, _inThread: true, _parentTs: parent.ts }));
+              } catch (e) {
+                scanErrors.push(`#${ch.name} thread ${parent.ts}: ${e.message}`);
+                console.warn(`[Slack] thread error #${ch.name} ts=${parent.ts}:`, e.message);
+              }
+            }
+
+            setMessages([...allMatches].sort((a, b) => parseFloat(b.ts) - parseFloat(a.ts)));
+            cursor = data.response_metadata?.next_cursor;
+          } while (cursor);
+        } catch (e) {
+          scanErrors.push(`#${ch.name}: ${e.message}`);
+        }
+      }
+
+      setErrors(scanErrors);
+      setMessages([...allMatches].sort((a, b) => parseFloat(b.ts) - parseFloat(a.ts)));
+    } catch (err) {
+      setErrors([err.message]);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => { scanChannels(); }, [scanChannels]);
+
+  const filtered = useMemo(() => {
+    if (!search.trim()) return messages;
+    const q = search.toLowerCase();
+    return messages.filter(m =>
+      slackStripMarkup(m.text).toLowerCase().includes(q) ||
+      m._channel?.name?.toLowerCase().includes(q)
+    );
+  }, [messages, search]);
+
+  const formatTs = (ts) => {
+    try { return format(new Date(parseFloat(ts) * 1000), 'MMM d, h:mm a'); }
+    catch { return ''; }
+  };
+
+  const permalink = (ch, ts, parentTs) => {
+    const p = ts.replace('.', '');
+    const base = `https://${SLACK_WORKSPACE}.slack.com/archives/${ch.id}/p${p}`;
+    // Thread replies need ?thread_ts= to open directly in the thread
+    if (parentTs) return `${base}?thread_ts=${parentTs}&cid=${ch.id}`;
+    return base;
+  };
+
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div
+        className="modal-content"
+        onClick={e => e.stopPropagation()}
+        style={{ maxWidth: '820px', width: '95vw', maxHeight: '90vh', display: 'flex', flexDirection: 'column', padding: 0 }}
+      >
+        {/* Header */}
+        <div className="modal-header" style={{ padding: '1rem 1.25rem', flexShrink: 0 }}>
+          <h2 style={{ fontSize: '1.1rem', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+            <MessageSquare size={18} />
+            @{SLACK_SEARCH_HANDLE}
+            {messages.length > 0 && (
+              <span style={{ fontSize: '0.78rem', fontWeight: 400, color: 'var(--text-muted)' }}>
+                {messages.length} mention{messages.length !== 1 ? 's' : ''}{loading ? '…' : ' · last 30 days'}
+              </span>
+            )}
+          </h2>
+          <div style={{ display: 'flex', gap: '0.4rem', alignItems: 'center' }}>
+            <button onClick={scanChannels} title="Refresh"
+              style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-muted)', display: 'flex', alignItems: 'center' }}>
+              <RefreshCw size={15} className={loading ? 'spin' : ''} />
+            </button>
+            <button onClick={onClose}
+              style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-muted)', display: 'flex', alignItems: 'center' }}>
+              <X size={20} />
+            </button>
+          </div>
+        </div>
+
+        {/* Errors */}
+        {errors.length > 0 && (
+          <div style={{ margin: '0 1.25rem 0.5rem', padding: '0.5rem 0.75rem', background: '#fef2f2', color: '#dc2626', borderRadius: '6px', fontSize: '0.78rem', flexShrink: 0 }}>
+            <AlertCircle size={13} style={{ verticalAlign: 'middle', marginRight: '4px' }} />
+            {errors.map((e, i) => <div key={i}>{e}</div>)}
+          </div>
+        )}
+
+        {/* Search */}
+        <div style={{ padding: '0 1.25rem 0.75rem', flexShrink: 0 }}>
+          <input
+            className="form-input"
+            value={search}
+            onChange={e => setSearch(e.target.value)}
+            placeholder="Filter by message or channel…"
+            style={{ width: '100%', fontSize: '0.85rem' }}
+          />
+        </div>
+
+        {/* Body */}
+        <div style={{ overflow: 'auto', flex: 1, padding: '0 1.25rem 1.25rem' }}>
+          {/* Status bar shown while scanning */}
+          {loading && (
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', padding: '0.4rem 0', marginBottom: '0.5rem', color: 'var(--text-muted)', fontSize: '0.82rem' }}>
+              <Loader2 size={14} className="spin" />
+              <span>{status}</span>
+            </div>
+          )}
+          {/* Empty state only when done scanning and nothing found */}
+          {!loading && filtered.length === 0 ? (
+            <div style={{ textAlign: 'center', padding: '3rem', color: 'var(--text-muted)', fontSize: '0.9rem' }}>
+              No mentions found in the last 30 days
+            </div>
+          ) : filtered.length > 0 ? (
+            filtered.map((msg, idx) => {
+              const ch = msg._channel;
+              const preview = slackStripMarkup(msg.text);
+              const time = formatTs(msg.ts);
+              const link = permalink(ch, msg.ts, msg._parentTs);
+
+              return (
+                <div key={`${msg.ts}-${idx}`} style={{
+                  padding: '0.75rem 0',
+                  borderBottom: '1px solid var(--border-color)',
+                  display: 'flex', flexDirection: 'column', gap: '0.35rem',
+                }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                    <span style={{
+                      display: 'inline-flex', alignItems: 'center', gap: '0.2rem',
+                      padding: '0.1rem 0.45rem', borderRadius: '4px', fontSize: '0.72rem', fontWeight: 600,
+                      background: ch?.is_private ? '#fef3c7' : '#eff6ff',
+                      color: ch?.is_private ? '#b45309' : '#1d4ed8',
+                    }}>
+                      {ch?.is_private ? <Shield size={10} /> : <Hash size={10} />}
+                      {ch?.name || ch?.id}
+                    </span>
+                    <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)', flex: 1 }}>
+                      {time}
+                      {msg._inThread && (
+                        <span style={{ marginLeft: '0.4rem', background: 'var(--bg-hover)', padding: '0.1rem 0.35rem', borderRadius: '3px' }}>
+                          thread reply
+                        </span>
+                      )}
+                    </span>
+                    <a
+                      href={link}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      style={{
+                        fontSize: '0.75rem', fontWeight: 600,
+                        color: 'var(--accent-primary)', textDecoration: 'none',
+                        padding: '0.2rem 0.5rem', borderRadius: '4px',
+                        border: '1px solid var(--accent-primary)',
+                        whiteSpace: 'nowrap',
+                      }}
+                    >
+                      Open Thread
+                    </a>
+                  </div>
+                  <p style={{
+                    margin: 0, fontSize: '0.83rem', color: 'var(--text-secondary)',
+                    overflow: 'hidden', display: '-webkit-box',
+                    WebkitLineClamp: 2, WebkitBoxOrient: 'vertical',
+                  }}>
+                    {preview}
+                  </p>
+                </div>
+              );
+            })
+          ) : null}
+        </div>
+      </div>
     </div>
   );
 };
@@ -2843,6 +3389,8 @@ function AuthenticatedApp({ onLogout }) {
   const [userProfile, setUserProfile] = useState(null);
   const [showGenerator, setShowGenerator] = useState(false);
   const [showDriveSheetModal, setShowDriveSheetModal] = useState(false);
+  const [showDevRevModal, setShowDevRevModal] = useState(false);
+  const [showSlackModal, setShowSlackModal] = useState(false);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [showAdminManager, setShowAdminManager] = useState(false);
   const [showDeptManager, setShowDeptManager] = useState(false);
@@ -3382,9 +3930,17 @@ function AuthenticatedApp({ onLogout }) {
                     const isSheetsEnabled = dept?.features?.includes('google_sheets_enable');
                     if (isSheetsEnabled) {
                       return (
-                        <button className="btn btn-primary" onClick={() => setShowDriveSheetModal(true)}>
-                          <PlusCircle size={16} /> Create Drive Sheet
-                        </button>
+                        <>
+                          <button className="btn btn-secondary" onClick={() => setShowSlackModal(true)} style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                            <MessageSquare size={16} /> Slack Threads
+                          </button>
+                          <button className="btn btn-secondary" onClick={() => setShowDevRevModal(true)} style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                            <Briefcase size={16} /> DevRev Tickets
+                          </button>
+                          <button className="btn btn-primary" onClick={() => setShowDriveSheetModal(true)}>
+                            <PlusCircle size={16} /> Create Drive Sheet
+                          </button>
+                        </>
                       );
                     }
                     return (
@@ -3485,6 +4041,8 @@ function AuthenticatedApp({ onLogout }) {
           />
         );
       })()}
+      {showDevRevModal && <DevRevTicketsModal onClose={() => setShowDevRevModal(false)} />}
+      {showSlackModal && <SlackThreadsModal onClose={() => setShowSlackModal(false)} />}
       {showDeleteConfirm && (
         <DeleteConfirm
           onClose={() => setShowDeleteConfirm(false)}

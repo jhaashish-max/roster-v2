@@ -12,6 +12,12 @@ export default defineConfig({
         changeOrigin: true,
         rewrite: (path) => path.replace(/^\/api\/n8n/, ''),
         secure: true
+      },
+      '/api/slack': {
+        target: 'https://slack.com/api',
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/api\/slack/, ''),
+        secure: true
       }
     }
   }
