@@ -2957,12 +2957,16 @@ function AuthenticatedApp({ onLogout }) {
     if (selectedDepartmentId) localStorage.setItem('roster_selected_dept', selectedDepartmentId);
   }, [selectedDepartmentId]);
 
-  // Set data layer mode based on department feature flag
+  // Set data layer mode — always ON for platform admins
   useEffect(() => {
-    const dept = departments.find(d => d.id === selectedDepartmentId);
-    const useSheets = dept?.features?.includes('google_sheets_enable') || false;
-    setDataLayerMode(useSheets);
-  }, [selectedDepartmentId, departments]);
+    if (userRole?.isPlatformAdmin) {
+      setDataLayerMode(true);
+    } else {
+      const dept = departments.find(d => d.id === selectedDepartmentId);
+      const useSheets = dept?.features?.includes('google_sheets_enable') || false;
+      setDataLayerMode(useSheets);
+    }
+  }, [selectedDepartmentId, departments, userRole]);
 
   const loadTeams = async () => {
     const data = await getTeams(selectedDepartmentId || undefined);
