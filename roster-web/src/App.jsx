@@ -49,7 +49,8 @@ import ShiftConfigModal from './components/ShiftConfigModal';
 import AgentAvailability from './components/AgentAvailability';
 import MiscSettings from './components/MiscSettings';
 import { format, startOfMonth, endOfMonth, eachDayOfInterval, addMonths, subMonths, isWeekend, isAfter, isBefore, parseISO, startOfDay, isSameDay } from 'date-fns';
-import { fetchRoster, fetchAllTeamsRoster, checkRosterExists, deleteRoster, updateRosterEntry, getTeams, createTeam, updateTeam, deleteTeam, isLoggedIn, getUserEmail, logout as authLogout, handleAuthCallback, checkAdmin, listAdmins, addAdmin, removeAdmin, whoAmI, createLeaveRequest, getMyRequests, getPendingRequests, reviewRequest, getTeamEmails, updateTeamEmails, getShiftConfigs, saveShiftConfigs, deleteShiftConfig, getDepartments, createDepartment, getDepartmentMembers, getShiftLegends, saveShiftLegends, updateDepartment } from './lib/api';
+import { fetchRoster, fetchAllTeamsRoster, checkRosterExists, deleteRoster, updateRosterEntry, getTeams, createTeam, updateTeam, deleteTeam, isLoggedIn, getUserEmail, logout as authLogout, handleAuthCallback, checkAdmin, listAdmins, addAdmin, removeAdmin, whoAmI, createLeaveRequest, getMyRequests, getPendingRequests, reviewRequest, getTeamEmails, updateTeamEmails, getShiftConfigs, saveShiftConfigs, deleteShiftConfig, getDepartments, createDepartment, getDepartmentMembers, getShiftLegends, saveShiftLegends, updateDepartment, setDataLayerMode, createDriveSheetForDept, importFromGoogleSheet } from './lib/api';
+import { isGoogleLoggedIn, googleLogout, getGoogleUserEmail } from './lib/googleAuth';
 import { getAvatarColor } from './lib/utils';
 
 // N8n Webhook URL - Using Vite proxy to bypass CORS in Dev, Direct URL in Prod
@@ -844,6 +845,276 @@ const RosterTable = ({ rosterData, currentDate, onChangeDate, isAdmin, loading, 
           ))}
         </div>
       )}
+    </div>
+  );
+};
+
+// ─── DRIVE SHEET MODAL ──────────────────────────────────
+const DriveSheetModal = ({ deptName, deptId, onClose, onCreated }) => {
+  const [tabs, setTabs] = useState([{ name: '', source: 'manual', headers: '', data: '', url: '', importing: false, imported: false }]);
+  const [prompt, setPrompt] = useState('');
+  const [creating, setCreating] = useState(false);
+  const [error, setError] = useState('');
+
+  const addTab = () => setTabs(prev => [...prev, { name: '', source: 'manual', headers: '', data: '', url: '', importing: false, imported: false }]);
+  const removeTab = (idx) => setTabs(prev => prev.filter((_, i) => i !== idx));
+  const updateTab = (idx, field, value) => setTabs(prev => prev.map((t, i) => i === idx ? { ...t, [field]: value } : t));
+
+  const handleImportGoogleSheet = async (idx) => {
+    const tab = tabs[idx];
+    if (!tab.url.trim()) return;
+    updateTab(idx, 'importing', true);
+    try {
+      const imported = await importFromGoogleSheet(tab.url.trim());
+      if (imported.length > 0) {
+        const first = imported[0];
+        updateTab(idx, 'name', tab.name || first.name);
+        updateTab(idx, 'headers', first.headers.join(', '));
+        updateTab(idx, 'data', first.data.map(r => r.join(', ')).join('\n'));
+        updateTab(idx, 'imported', true);
+        if (imported.length > 1) {
+          const newTabs = imported.slice(1).map(t => ({
+            name: t.name,
+            source: 'google_sheet',
+            headers: t.headers.join(', '),
+            data: t.data.map(r => r.join(', ')).join('\n'),
+            url: tab.url,
+            importing: false,
+            imported: true,
+          }));
+          setTabs(prev => [...prev, ...newTabs]);
+        }
+      }
+    } catch (err) {
+      setError(`Import failed: ${err.message}`);
+    } finally {
+      updateTab(idx, 'importing', false);
+    }
+  };
+
+  const handleCreate = async () => {
+    setCreating(true);
+    setError('');
+    try {
+      const tabConfigs = tabs
+        .filter(t => t.name.trim())
+        .map(t => ({
+          name: t.name.trim(),
+          headers: t.headers ? t.headers.split(',').map(h => h.trim()).filter(Boolean) : [],
+          data: t.data ? t.data.split('\n').filter(r => r.trim()).map(row => row.split(',').map(cell => cell.trim())) : [],
+        }));
+      const result = await createDriveSheetForDept(deptId, deptName, tabConfigs);
+      onCreated(result);
+    } catch (err) {
+      setError(err.message || 'Failed to create drive sheet');
+    } finally {
+      setCreating(false);
+    }
+  };
+
+  const DATA_SOURCES = [
+    { value: 'manual', label: 'Manual Input' },
+    { value: 'google_sheet', label: 'Google Sheet' },
+    { value: 'devrev', label: 'DevRev' },
+    { value: 'jira', label: 'Jira' },
+  ];
+
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div className="modal-content" onClick={e => e.stopPropagation()} style={{ maxWidth: '640px', maxHeight: '85vh', overflow: 'auto' }}>
+        <div className="modal-header">
+          <h2 style={{ fontSize: '1.1rem', fontWeight: 600 }}>
+            <TableIcon size={18} style={{ verticalAlign: 'middle', marginRight: '0.5rem' }} />
+            Create Drive Sheet — {deptName} Roster Db
+          </h2>
+          <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-muted)' }}>
+            <X size={20} />
+          </button>
+        </div>
+
+        {error && (
+          <div style={{ padding: '0.5rem 0.75rem', background: '#fef2f2', color: '#dc2626', borderRadius: '6px', fontSize: '0.8rem', margin: '0.5rem 0' }}>
+            <AlertCircle size={14} style={{ verticalAlign: 'middle', marginRight: '4px' }} /> {error}
+          </div>
+        )}
+
+        <div style={{ marginTop: '1rem' }}>
+          <label style={{ fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-secondary)', display: 'block', marginBottom: '0.3rem' }}>
+            Describe what this sheet should contain (optional)
+          </label>
+          <textarea
+            className="form-textarea"
+            value={prompt}
+            onChange={e => setPrompt(e.target.value)}
+            placeholder="E.g., Track projects, bandwidth allocation, tickets, and issues for the PS-POS team..."
+            rows={2}
+            style={{ width: '100%', fontSize: '0.85rem' }}
+          />
+        </div>
+
+        <div style={{ marginTop: '1.25rem' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.5rem' }}>
+            <label style={{ fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-secondary)' }}>Sheet Tabs</label>
+            <button onClick={addTab} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--accent-primary)', fontSize: '0.8rem', fontWeight: 600 }}>
+              <Plus size={14} style={{ verticalAlign: 'middle' }} /> Add Tab
+            </button>
+          </div>
+
+          {tabs.map((tab, idx) => (
+            <div key={idx} style={{ background: 'var(--bg-hover)', borderRadius: '8px', padding: '0.75rem', marginBottom: '0.75rem' }}>
+              <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', marginBottom: '0.5rem' }}>
+                <input
+                  className="form-input"
+                  value={tab.name}
+                  onChange={e => updateTab(idx, 'name', e.target.value)}
+                  placeholder="Tab name (e.g., Projects, Tickets)"
+                  style={{ flex: 1, fontSize: '0.85rem' }}
+                />
+                {tabs.length > 1 && (
+                  <button onClick={() => removeTab(idx)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--accent-danger)' }}>
+                    <Trash2 size={14} />
+                  </button>
+                )}
+              </div>
+
+              {/* Data Source Selector */}
+              <div style={{ marginBottom: '0.5rem' }}>
+                <label style={{ fontSize: '0.7rem', fontWeight: 600, color: 'var(--text-muted)', display: 'block', marginBottom: '0.25rem' }}>Tab Data Source</label>
+                <div style={{ display: 'flex', gap: '0.4rem', flexWrap: 'wrap' }}>
+                  {DATA_SOURCES.map(src => (
+                    <button
+                      key={src.value}
+                      onClick={() => updateTab(idx, 'source', src.value)}
+                      style={{
+                        padding: '0.3rem 0.6rem',
+                        borderRadius: '6px',
+                        border: '1px solid',
+                        borderColor: tab.source === src.value ? 'var(--accent-primary)' : 'var(--border-color)',
+                        background: tab.source === src.value ? 'var(--accent-primary)' : 'var(--bg-secondary)',
+                        color: tab.source === src.value ? '#fff' : 'var(--text-primary)',
+                        fontSize: '0.75rem',
+                        fontWeight: 500,
+                        cursor: 'pointer',
+                        transition: 'all 0.15s',
+                      }}
+                    >
+                      {src.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Manual Input */}
+              {tab.source === 'manual' && (
+                <>
+                  <input
+                    className="form-input"
+                    value={tab.headers}
+                    onChange={e => updateTab(idx, 'headers', e.target.value)}
+                    placeholder="Column headers (comma-separated, e.g., Project, Assignee, Status)"
+                    style={{ width: '100%', fontSize: '0.8rem', marginBottom: '0.4rem' }}
+                  />
+                  <textarea
+                    className="form-textarea"
+                    value={tab.data}
+                    onChange={e => updateTab(idx, 'data', e.target.value)}
+                    placeholder="Paste data rows (one row per line, comma-separated)"
+                    rows={3}
+                    style={{ width: '100%', fontSize: '0.8rem' }}
+                  />
+                </>
+              )}
+
+              {/* Google Sheet Import */}
+              {tab.source === 'google_sheet' && (
+                <>
+                  <div style={{ display: 'flex', gap: '0.4rem', marginBottom: '0.4rem' }}>
+                    <input
+                      className="form-input"
+                      value={tab.url}
+                      onChange={e => updateTab(idx, 'url', e.target.value)}
+                      placeholder="Paste Google Sheets URL..."
+                      style={{ flex: 1, fontSize: '0.8rem' }}
+                    />
+                    <button
+                      className="btn btn-primary"
+                      onClick={() => handleImportGoogleSheet(idx)}
+                      disabled={tab.importing || !tab.url.trim()}
+                      style={{ fontSize: '0.75rem', padding: '0.3rem 0.7rem', whiteSpace: 'nowrap' }}
+                    >
+                      {tab.importing ? <Loader2 size={12} className="spin" /> : 'Import'}
+                    </button>
+                  </div>
+                  {tab.imported && (
+                    <div style={{ fontSize: '0.75rem', color: 'var(--accent-success)', marginBottom: '0.3rem' }}>
+                      <CheckCircle size={12} style={{ verticalAlign: 'middle', marginRight: '4px' }} />
+                      Imported {tab.headers ? tab.headers.split(',').length : 0} columns, {tab.data ? tab.data.split('\n').filter(r => r.trim()).length : 0} rows
+                    </div>
+                  )}
+                  <input
+                    className="form-input"
+                    value={tab.headers}
+                    onChange={e => updateTab(idx, 'headers', e.target.value)}
+                    placeholder="Column headers (auto-filled on import)"
+                    style={{ width: '100%', fontSize: '0.8rem', marginBottom: '0.4rem' }}
+                  />
+                  <textarea
+                    className="form-textarea"
+                    value={tab.data}
+                    onChange={e => updateTab(idx, 'data', e.target.value)}
+                    placeholder="Data will appear here after import"
+                    rows={3}
+                    style={{ width: '100%', fontSize: '0.8rem' }}
+                  />
+                </>
+              )}
+
+              {/* DevRev */}
+              {tab.source === 'devrev' && (
+                <div>
+                  <input
+                    className="form-input"
+                    value={tab.url}
+                    onChange={e => updateTab(idx, 'url', e.target.value)}
+                    placeholder="Paste DevRev work item IDs (comma-separated) or project URL..."
+                    style={{ width: '100%', fontSize: '0.8rem', marginBottom: '0.4rem' }}
+                  />
+                  <p style={{ fontSize: '0.7rem', color: 'var(--text-muted)', margin: 0 }}>
+                    DevRev integration coming soon. For now, export from DevRev and use Google Sheet or Manual import.
+                  </p>
+                </div>
+              )}
+
+              {/* Jira */}
+              {tab.source === 'jira' && (
+                <div>
+                  <input
+                    className="form-input"
+                    value={tab.url}
+                    onChange={e => updateTab(idx, 'url', e.target.value)}
+                    placeholder="Paste Jira project URL or JQL filter..."
+                    style={{ width: '100%', fontSize: '0.8rem', marginBottom: '0.4rem' }}
+                  />
+                  <p style={{ fontSize: '0.7rem', color: 'var(--text-muted)', margin: 0 }}>
+                    Jira integration coming soon. For now, export from Jira and use Google Sheet or Manual import.
+                  </p>
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+
+        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '0.5rem', marginTop: '1.25rem' }}>
+          <button className="btn btn-secondary" onClick={onClose}>Cancel</button>
+          <button
+            className="btn btn-primary"
+            onClick={handleCreate}
+            disabled={creating || !tabs.some(t => t.name.trim())}
+          >
+            {creating ? <><Loader2 size={14} className="spin" /> Creating...</> : <><PlusCircle size={14} /> Create Sheet</>}
+          </button>
+        </div>
+      </div>
     </div>
   );
 };
@@ -1715,8 +1986,8 @@ const TeamSettings = ({ onClose, onTeamsChange, departmentId }) => {
 
 // --- MAIN APP ---
 function App() {
-  // Auth State
-  const [authenticated, setAuthenticated] = useState(isLoggedIn());
+  // Auth State — support both Supabase and Google direct sessions
+  const [authenticated, setAuthenticated] = useState(isLoggedIn() || isGoogleLoggedIn());
 
   // Check for OAuth redirect hash on load
   useEffect(() => {
@@ -1732,6 +2003,7 @@ function App() {
 
   const handleLogout = () => {
     authLogout();
+    googleLogout();
     setAuthenticated(false);
   };
 
@@ -2570,6 +2842,7 @@ function AuthenticatedApp({ onLogout }) {
   const [userRole, setUserRole] = useState(null); // { isPlatformAdmin, canEdit, roles, departments }
   const [userProfile, setUserProfile] = useState(null);
   const [showGenerator, setShowGenerator] = useState(false);
+  const [showDriveSheetModal, setShowDriveSheetModal] = useState(false);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [showAdminManager, setShowAdminManager] = useState(false);
   const [showDeptManager, setShowDeptManager] = useState(false);
@@ -2647,10 +2920,14 @@ function AuthenticatedApp({ onLogout }) {
 
   // Load teams on mount + check admin status + fetch user profile
   useEffect(() => {
+    // If logged in via Google (no Supabase), enable Sheets mode before any API calls
+    if (isGoogleLoggedIn() && !isLoggedIn()) {
+      setDataLayerMode(true);
+    }
     loadDepartments();
     checkAdmin().then(roleInfo => {
       setUserRole(roleInfo);
-    }).catch(() => setUserRole(null));
+    }).catch((e) => { console.error('checkAdmin failed', e); setUserRole(null); });
     whoAmI().then(profile => {
       setUserProfile(profile);
     }).catch(() => setUserProfile(null));
@@ -2679,6 +2956,13 @@ function AuthenticatedApp({ onLogout }) {
   useEffect(() => {
     if (selectedDepartmentId) localStorage.setItem('roster_selected_dept', selectedDepartmentId);
   }, [selectedDepartmentId]);
+
+  // Set data layer mode based on department feature flag
+  useEffect(() => {
+    const dept = departments.find(d => d.id === selectedDepartmentId);
+    const useSheets = dept?.features?.includes('google_sheets_enable') || false;
+    setDataLayerMode(useSheets);
+  }, [selectedDepartmentId, departments]);
 
   const loadTeams = async () => {
     const data = await getTeams(selectedDepartmentId || undefined);
@@ -2957,7 +3241,7 @@ function AuthenticatedApp({ onLogout }) {
           )}
 
           {/* Department Picker */}
-          {departments.length > 1 && !sidebarCollapsed && (
+          {departments.length >= 1 && !sidebarCollapsed && (
             <div style={{ padding: '0 12px', marginTop: '0.5rem' }}>
               <select
                 value={selectedDepartmentId}
@@ -2986,6 +3270,49 @@ function AuthenticatedApp({ onLogout }) {
               <Building2 size={20} />
             </button>
           )}
+
+          {/* Google Sheets toggle — shown for non-TS departments */}
+          {isAdmin && !sidebarCollapsed && selectedDepartmentId && (() => {
+            const dept = departments.find(d => d.id === selectedDepartmentId);
+            if (!dept || dept.name === 'TS') return null;
+            const isEnabled = dept?.features?.includes('google_sheets_enable') || false;
+            return (
+              <div style={{ padding: '0 12px', marginTop: '0.5rem' }}>
+                <button
+                  onClick={async () => {
+                    const newFeatures = isEnabled
+                      ? (dept.features || []).filter(f => f !== 'google_sheets_enable')
+                      : [...(dept.features || []), 'google_sheets_enable'];
+                    try {
+                      await updateDepartment(dept.id, { features: newFeatures });
+                      loadDepartments();
+                      window.dispatchEvent(new CustomEvent('departmentFeaturesUpdated'));
+                    } catch (err) {
+                      console.error('Failed to toggle Google Sheets', err);
+                    }
+                  }}
+                  style={{
+                    width: '100%',
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '8px',
+                    padding: '0.5rem 0.6rem',
+                    borderRadius: 'var(--radius-sm)',
+                    border: '1px solid var(--border-color)',
+                    background: isEnabled ? 'var(--accent-primary)' : 'var(--bg-secondary)',
+                    color: isEnabled ? '#fff' : 'var(--text-primary)',
+                    fontSize: '0.78rem',
+                    fontWeight: 500,
+                    cursor: 'pointer',
+                    transition: 'all 0.2s',
+                  }}
+                >
+                  <TableIcon size={14} />
+                  Google Sheets {isEnabled ? 'ON' : 'OFF'}
+                </button>
+              </div>
+            );
+          })()}
 
           {isAdmin && !sidebarCollapsed && (
             <>
@@ -3046,11 +3373,22 @@ function AuthenticatedApp({ onLogout }) {
               headerAction={
                 <div style={{ display: 'flex', gap: '1rem', alignItems: 'center' }}>
                   <TeamSelector teams={teams} selectedTeams={selectedTeams} setSelectedTeams={setSelectedTeams} />
-                  {isAdmin && (
-                    <button className="btn btn-primary" onClick={() => setShowGenerator(true)}>
-                      <PlusCircle size={16} /> Generate Roster
-                    </button>
-                  )}
+                  {isAdmin && (() => {
+                    const dept = departments.find(d => d.id === selectedDepartmentId);
+                    const isSheetsEnabled = dept?.features?.includes('google_sheets_enable');
+                    if (isSheetsEnabled) {
+                      return (
+                        <button className="btn btn-primary" onClick={() => setShowDriveSheetModal(true)}>
+                          <PlusCircle size={16} /> Create Drive Sheet
+                        </button>
+                      );
+                    }
+                    return (
+                      <button className="btn btn-primary" onClick={() => setShowGenerator(true)}>
+                        <PlusCircle size={16} /> Generate Roster
+                      </button>
+                    );
+                  })()}
                 </div>
               }
             />
@@ -3127,6 +3465,22 @@ function AuthenticatedApp({ onLogout }) {
           teams={teams}
         />
       )}
+      {showDriveSheetModal && (() => {
+        const dept = departments.find(d => d.id === selectedDepartmentId);
+        const deptName = dept?.name || 'Department';
+        return (
+          <DriveSheetModal
+            deptName={deptName}
+            deptId={selectedDepartmentId}
+            onClose={() => setShowDriveSheetModal(false)}
+            onCreated={(result) => {
+              setShowDriveSheetModal(false);
+              loadDepartments();
+              setToast({ message: `Drive sheet "${deptName} Roster Db" created!`, type: 'success' });
+            }}
+          />
+        );
+      })()}
       {showDeleteConfirm && (
         <DeleteConfirm
           onClose={() => setShowDeleteConfirm(false)}

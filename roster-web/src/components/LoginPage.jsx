@@ -1,20 +1,40 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { signInWithGoogle } from '../lib/api';
+import { initGoogleAuth, signInWithGoogleDirect, isGoogleAuthConfigured } from '../lib/googleAuth';
 import { Loader2, LogIn, AlertCircle } from 'lucide-react';
 import Logo from './Logo';
 
-const LoginPage = () => {
+const LoginPage = ({ onLogin }) => {
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState('');
+    const [gisReady, setGisReady] = useState(false);
+
+    useEffect(() => {
+        if (isGoogleAuthConfigured()) {
+            const waitForGis = setInterval(() => {
+                if (typeof google !== 'undefined' && google.accounts) {
+                    initGoogleAuth();
+                    setGisReady(true);
+                    clearInterval(waitForGis);
+                }
+            }, 100);
+            return () => clearInterval(waitForGis);
+        }
+    }, []);
 
     const handleGoogleLogin = async () => {
         setLoading(true);
         setError('');
         try {
-            await signInWithGoogle();
-            // Note: The browser will redirect to Google here, so loading state stays true
+            if (isGoogleAuthConfigured() && gisReady) {
+                await signInWithGoogleDirect();
+                onLogin?.();
+            } else {
+                await signInWithGoogle();
+            }
         } catch (err) {
             setError(err.message || 'Failed to initialize Google Login');
+        } finally {
             setLoading(false);
         }
     };

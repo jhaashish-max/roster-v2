@@ -13,6 +13,7 @@ const DEFAULT_LEGENDS = [
 
 const AVAILABLE_FEATURES = [
   { key: 'auto_bucket', label: 'Auto Bucket Management', description: 'Automatically enable/disable Freshdesk agent availability based on shift timings' },
+  { key: 'google_sheets_enable', label: 'Google Sheets Backend', description: 'Use Google Sheets as the data layer instead of the backend API. Requires Google OAuth with Sheets/Drive scopes.' },
 ];
 
 export default function MiscSettings({ departmentId, departmentName, departments }) {

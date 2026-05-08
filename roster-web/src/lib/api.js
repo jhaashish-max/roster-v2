@@ -1,5 +1,16 @@
 const API_BASE = import.meta.env.VITE_API_BASE_URL || 'https://roster-api-v2.jha-ashish.workers.dev';
 
+let _useSheetsMode = false;
+let _sheetsApi = null;
+
+async function getSheetsApi() {
+  if (!_sheetsApi) _sheetsApi = await import('./sheetsApi');
+  return _sheetsApi;
+}
+
+export function setDataLayerMode(useSheets) { _useSheetsMode = useSheets; }
+export function getDataLayerMode() { return _useSheetsMode; }
+
 // ==================== AUTH HELPERS ====================
 
 export function getToken() {
@@ -128,13 +139,25 @@ async function authFetch(path, options = {}) {
 // ==================== DEPARTMENT FUNCTIONS ====================
 
 export async function getDepartments() {
+    if (_useSheetsMode) { const s = await getSheetsApi(); return s.getDepartments(); }
     const res = await authFetch('/api/departments');
     const data = await res.json();
     if (!res.ok) throw new Error(data.error);
     return data;
 }
 
+export async function createDriveSheetForDept(departmentId, departmentName, tabConfigs) {
+    const s = await getSheetsApi();
+    return s.createDriveSheetForDept(departmentId, departmentName, tabConfigs);
+}
+
+export async function importFromGoogleSheet(sheetUrl) {
+    const s = await getSheetsApi();
+    return s.importFromGoogleSheet(sheetUrl);
+}
+
 export async function createDepartment(name, slug) {
+    if (_useSheetsMode) { const s = await getSheetsApi(); return s.createDepartment(name, slug); }
     const res = await authFetch('/api/departments', {
         method: 'POST',
         body: JSON.stringify({ name, slug })
@@ -145,6 +168,7 @@ export async function createDepartment(name, slug) {
 }
 
 export async function updateDepartment(id, updates) {
+    if (_useSheetsMode) { const s = await getSheetsApi(); return s.updateDepartment(id, updates); }
     const res = await authFetch('/api/departments', {
         method: 'PUT',
         body: JSON.stringify({ id, ...updates })
@@ -155,6 +179,7 @@ export async function updateDepartment(id, updates) {
 }
 
 export async function getDepartmentMembers(departmentId) {
+    if (_useSheetsMode) { const s = await getSheetsApi(); return s.getDepartmentMembers(departmentId); }
     const res = await authFetch(`/api/departments/members?department_id=${departmentId}`);
     const data = await res.json();
     if (!res.ok) throw new Error(data.error);
@@ -164,6 +189,7 @@ export async function getDepartmentMembers(departmentId) {
 // ==================== ROSTER FUNCTIONS ====================
 
 export async function fetchRoster(year, month, teamId, departmentId) {
+    if (_useSheetsMode) { const s = await getSheetsApi(); return s.fetchRoster(year, month, teamId, departmentId); }
     const params = new URLSearchParams({ year, month });
     if (teamId) params.set('team_id', teamId);
     if (departmentId) params.set('department_id', departmentId);
@@ -175,6 +201,7 @@ export async function fetchRoster(year, month, teamId, departmentId) {
 }
 
 export async function fetchAllTeamsRoster(year, month, departmentId) {
+    if (_useSheetsMode) { const s = await getSheetsApi(); return s.fetchAllTeamsRoster(year, month, departmentId); }
     const params = new URLSearchParams({ year, month });
     if (departmentId) params.set('department_id', departmentId);
 
@@ -185,6 +212,7 @@ export async function fetchAllTeamsRoster(year, month, departmentId) {
 }
 
 export async function checkRosterExists(year, month, teamId, departmentId) {
+    if (_useSheetsMode) { const s = await getSheetsApi(); return s.checkRosterExists(year, month, teamId, departmentId); }
     const params = new URLSearchParams({ year, month, team_id: teamId });
     if (departmentId) params.set('department_id', departmentId);
 
@@ -195,6 +223,7 @@ export async function checkRosterExists(year, month, teamId, departmentId) {
 }
 
 export async function deleteRoster(year, month, teamId, departmentId) {
+    if (_useSheetsMode) { const s = await getSheetsApi(); return s.deleteRoster(year, month, teamId, departmentId); }
     const params = new URLSearchParams({ year, month, team_id: teamId });
     if (departmentId) params.set('department_id', departmentId);
 
@@ -205,6 +234,7 @@ export async function deleteRoster(year, month, teamId, departmentId) {
 }
 
 export async function updateRosterEntry(date, memberId, status, teamId, departmentId) {
+    if (_useSheetsMode) { const s = await getSheetsApi(); return s.updateRosterEntry(date, memberId, status, teamId, departmentId); }
     const headers = {};
     if (departmentId) headers['X-Department-Id'] = departmentId;
 
@@ -219,6 +249,7 @@ export async function updateRosterEntry(date, memberId, status, teamId, departme
 }
 
 export async function bulkUpdateRosterEntries(entries, departmentId) {
+    if (_useSheetsMode) { const s = await getSheetsApi(); return s.bulkUpdateRosterEntries(entries, departmentId); }
     const headers = {};
     if (departmentId) headers['X-Department-Id'] = departmentId;
 
@@ -235,6 +266,7 @@ export async function bulkUpdateRosterEntries(entries, departmentId) {
 // ==================== TEAM FUNCTIONS ====================
 
 export async function getTeams(departmentId) {
+    if (_useSheetsMode) { const s = await getSheetsApi(); return s.getTeams(departmentId); }
     const params = new URLSearchParams();
     if (departmentId) params.set('department_id', departmentId);
 
@@ -245,6 +277,7 @@ export async function getTeams(departmentId) {
 }
 
 export async function createTeam(name, members, customPrompt, departmentId) {
+    if (_useSheetsMode) { const s = await getSheetsApi(); return s.createTeam(name, members, customPrompt, departmentId); }
     const headers = {};
     if (departmentId) headers['X-Department-Id'] = departmentId;
 
@@ -264,6 +297,7 @@ export async function createTeam(name, members, customPrompt, departmentId) {
 }
 
 export async function updateTeam(id, updates, departmentId) {
+    if (_useSheetsMode) { const s = await getSheetsApi(); return s.updateTeam(id, updates, departmentId); }
     const headers = {};
     if (departmentId) headers['X-Department-Id'] = departmentId;
 
@@ -282,6 +316,7 @@ export async function updateTeam(id, updates, departmentId) {
 }
 
 export async function deleteTeam(id, departmentId) {
+    if (_useSheetsMode) { const s = await getSheetsApi(); return s.deleteTeam(id, departmentId); }
     const headers = {};
     if (departmentId) headers['X-Department-Id'] = departmentId;
 
@@ -297,6 +332,7 @@ export async function deleteTeam(id, departmentId) {
 // ==================== ADMIN FUNCTIONS ====================
 
 export async function checkAdmin() {
+    if (_useSheetsMode) { const s = await getSheetsApi(); return s.checkAdmin(); }
     const res = await authFetch('/api/admin?action=check');
     const data = await res.json();
     if (!res.ok) throw new Error(data.error);
@@ -304,6 +340,7 @@ export async function checkAdmin() {
 }
 
 export async function listAdmins() {
+    if (_useSheetsMode) { const s = await getSheetsApi(); return s.listAdmins(); }
     const res = await authFetch('/api/admin?action=list');
     const data = await res.json();
     if (!res.ok) throw new Error(data.error);
@@ -311,6 +348,7 @@ export async function listAdmins() {
 }
 
 export async function listDeptAdmins(departmentId) {
+    if (_useSheetsMode) { const s = await getSheetsApi(); return s.listDeptAdmins(departmentId); }
     const res = await authFetch(`/api/admin?action=dept-admins&department_id=${departmentId}`);
     const data = await res.json();
     if (!res.ok) throw new Error(data.error);
@@ -318,6 +356,7 @@ export async function listDeptAdmins(departmentId) {
 }
 
 export async function addAdmin(email, role = 'platform_admin', departmentId = null) {
+    if (_useSheetsMode) { const s = await getSheetsApi(); return s.addAdmin(email, role, departmentId); }
     const res = await authFetch('/api/admin?action=add', {
         method: 'POST',
         body: JSON.stringify({ email, role, department_id: departmentId })
@@ -328,6 +367,7 @@ export async function addAdmin(email, role = 'platform_admin', departmentId = nu
 }
 
 export async function removeAdmin(email, role = 'platform_admin', departmentId = null) {
+    if (_useSheetsMode) { const s = await getSheetsApi(); return s.removeAdmin(email, role, departmentId); }
     const res = await authFetch('/api/admin?action=remove', {
         method: 'POST',
         body: JSON.stringify({ email, role, department_id: departmentId })
@@ -340,6 +380,7 @@ export async function removeAdmin(email, role = 'platform_admin', departmentId =
 // ==================== LEAVE REQUEST FUNCTIONS ====================
 
 export async function whoAmI() {
+    if (_useSheetsMode) { const s = await getSheetsApi(); return s.whoAmI(); }
     const res = await authFetch('/api/requests?action=whoami');
     const data = await res.json();
     if (!res.ok) throw new Error(data.error);
@@ -347,6 +388,7 @@ export async function whoAmI() {
 }
 
 export async function createLeaveRequest({ request_type, dates, reason }) {
+    if (_useSheetsMode) { const s = await getSheetsApi(); return s.createLeaveRequest({ request_type, dates, reason }); }
     const res = await authFetch('/api/requests?action=create', {
         method: 'POST',
         body: JSON.stringify({ request_type, dates, reason })
@@ -357,6 +399,7 @@ export async function createLeaveRequest({ request_type, dates, reason }) {
 }
 
 export async function getMyRequests() {
+    if (_useSheetsMode) { const s = await getSheetsApi(); return s.getMyRequests(); }
     const res = await authFetch('/api/requests?action=my-requests');
     const data = await res.json();
     if (!res.ok) throw new Error(data.error);
@@ -364,6 +407,7 @@ export async function getMyRequests() {
 }
 
 export async function getPendingRequests(departmentId) {
+    if (_useSheetsMode) { const s = await getSheetsApi(); return s.getPendingRequests(departmentId); }
     const params = new URLSearchParams({ action: 'pending' });
     if (departmentId) params.set('department_id', departmentId);
 
@@ -374,6 +418,7 @@ export async function getPendingRequests(departmentId) {
 }
 
 export async function reviewRequest(id, decision) {
+    if (_useSheetsMode) { const s = await getSheetsApi(); return s.reviewRequest(id, decision); }
     const res = await authFetch('/api/requests?action=review', {
         method: 'POST',
         body: JSON.stringify({ id, decision })
@@ -386,6 +431,7 @@ export async function reviewRequest(id, decision) {
 // ==================== MEMBER EMAILS FUNCTIONS ====================
 
 export async function getTeamEmails(departmentId) {
+    if (_useSheetsMode) { const s = await getSheetsApi(); return s.getTeamEmails(departmentId); }
     const params = new URLSearchParams();
     if (departmentId) params.set('department_id', departmentId);
     const res = await authFetch(`/api/teams/emails${params.toString() ? '?' + params : ''}`);
@@ -395,6 +441,7 @@ export async function getTeamEmails(departmentId) {
 }
 
 export async function updateTeamEmails(emails) {
+    if (_useSheetsMode) { const s = await getSheetsApi(); return s.updateTeamEmails(emails); }
     const res = await authFetch('/api/teams/emails', {
         method: 'POST',
         body: JSON.stringify({ emails })
@@ -407,6 +454,7 @@ export async function updateTeamEmails(emails) {
 // ==================== SHIFT CONFIGURATIONS ====================
 
 export async function getShiftConfigs(departmentId) {
+    if (_useSheetsMode) { const s = await getSheetsApi(); return s.getShiftConfigs(departmentId); }
     const params = new URLSearchParams();
     if (departmentId) params.set('department_id', departmentId);
 
@@ -417,6 +465,7 @@ export async function getShiftConfigs(departmentId) {
 }
 
 export async function saveShiftConfigs(configs) {
+    if (_useSheetsMode) { const s = await getSheetsApi(); return s.saveShiftConfigs(configs); }
     const res = await authFetch('/api/teams/shift-configs', {
         method: 'POST',
         body: JSON.stringify({ configs })
@@ -427,6 +476,7 @@ export async function saveShiftConfigs(configs) {
 }
 
 export async function deleteShiftConfig(id) {
+    if (_useSheetsMode) { const s = await getSheetsApi(); return s.deleteShiftConfig(id); }
     const res = await authFetch(`/api/teams/shift-configs?id=${id}`, {
         method: 'DELETE'
     });
@@ -438,6 +488,7 @@ export async function deleteShiftConfig(id) {
 // ==================== SHIFT LEGENDS ====================
 
 export async function getShiftLegends(departmentId) {
+    if (_useSheetsMode) { const s = await getSheetsApi(); return s.getShiftLegends(departmentId); }
     const params = new URLSearchParams();
     if (departmentId) params.set('department_id', departmentId);
 
@@ -448,6 +499,7 @@ export async function getShiftLegends(departmentId) {
 }
 
 export async function saveShiftLegends(legends, departmentId) {
+    if (_useSheetsMode) { const s = await getSheetsApi(); return s.saveShiftLegends(legends, departmentId); }
     const params = departmentId ? `?department_id=${departmentId}` : '';
     const res = await authFetch(`/api/shift-legends${params}`, {
         method: 'POST',
