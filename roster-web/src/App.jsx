@@ -280,7 +280,971 @@ const getStatusClass = (status, dateObj) => {
   return 'cell-other';
 };
 
-const Dashboard = ({ rosterData, currentDate, onChangeDate, loading, headerAction }) => {
+// ─── PS DASHBOARD HOME (Alchemist-style summary) ──────────────────────────────────
+const PSDashboardHome = ({ deptName, sheets = [] }) => {
+  // DevRev tickets for Recent Activity
+  const [tickets, setTickets] = useState([]);
+
+  // AI Insights from Google Sheet tab "ai projects"
+  const [aiInsights, setAiInsights] = useState([]);
+  const [aiHeaders, setAiHeaders] = useState([]);
+  const [aiInsightsLoading, setAiInsightsLoading] = useState(true);
+  const [showAllInsights, setShowAllInsights] = useState(false);
+
+  // Background load: DevRev tickets for Recent Activity
+  useEffect(() => {
+    if (!DEVREV_TOKEN) return;
+    (async () => {
+      try {
+        let allWorks = [], cursor = null;
+        do {
+          const params = new URLSearchParams({ type: 'issue', 'issue.sprint': DEVREV_SPRINT_ID, limit: '100' });
+          if (cursor) params.append('cursor', cursor);
+          const res = await fetch(`https://api.devrev.ai/works.list?${params}`, { headers: { 'Authorization': `Bearer ${DEVREV_TOKEN}` } });
+          if (!res.ok) break;
+          const data = await res.json();
+          allWorks = allWorks.concat(data.works || []);
+          cursor = data.next_cursor || null;
+          if (allWorks.length >= 500) break;
+        } while (cursor);
+        setTickets(allWorks);
+      } catch { }
+    })();
+  }, []);
+
+  // Background load: AI Insights from Google Sheet tab "ai projects"
+  useEffect(() => {
+    if (!sheets.length) { setAiInsightsLoading(false); return; }
+    (async () => {
+      try {
+        const { importFromGoogleSheet } = await import('./lib/sheetsApi');
+        console.log('[AI Insights] sheets:', sheets);
+        for (const s of sheets) {
+          console.log('[AI Insights] reading sheet:', s.url);
+          const tabs = await importFromGoogleSheet(s.url);
+          console.log('[AI Insights] tabs found:', tabs.map(t => t.name));
+          const aiTab = tabs.find(t => t.name.toLowerCase().includes('ai') && t.name.toLowerCase().includes('projects'));
+          if (aiTab && aiTab.data.length > 0) {
+            console.log('[AI Insights] found tab:', aiTab.name, 'headers:', aiTab.headers, 'rows:', aiTab.data.length);
+            setAiHeaders(aiTab.headers);
+            setAiInsights(aiTab.data);
+            break;
+          }
+        }
+      } catch (err) { console.error('[AI Insights] error:', err); }
+      finally { setAiInsightsLoading(false); }
+    })();
+  }, [sheets]);
+
+  const recentTickets = useMemo(() =>
+    [...tickets].sort((a, b) => new Date(b.modified_date || b.created_date) - new Date(a.modified_date || a.created_date)).slice(0, 3),
+  [tickets]);
+
+  const cardStyle = (bg) => ({
+    padding: '1.25rem', borderRadius: '12px', background: bg,
+    border: '1px solid var(--border-color)', flex: 1, minWidth: '200px',
+  });
+  const metricLabel = { fontSize: '0.75rem', color: 'rgba(255,255,255,0.7)', marginBottom: '0.15rem' };
+  const metricValue = { fontSize: '1.5rem', fontWeight: 700, color: '#fff' };
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
+      <div>
+        <h2 style={{ fontSize: '1.25rem', fontWeight: 700, color: 'var(--text-primary)', marginBottom: '0.25rem' }}>
+          Welcome to {deptName} Dashboard!
+        </h2>
+        <p style={{ fontSize: '0.85rem', color: 'var(--text-muted)', margin: 0 }}>
+          Get insights and manage your workspace efficiently.
+        </p>
+      </div>
+
+      {/* Key Metrics + Recent Activity + AI Insights — 3 cards */}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '0.75rem' }}>
+
+        {/* Key Metrics — hardcoded */}
+        <div style={cardStyle('linear-gradient(135deg, #4f46e5, #7c3aed)')}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', marginBottom: '1rem' }}>
+            <PieChart size={16} color="#fff" />
+            <span style={{ fontSize: '0.85rem', fontWeight: 600, color: '#fff' }}>Key Metrics</span>
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.6rem' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+              <span style={metricLabel}>Active Projects</span>
+              <span style={metricValue}>3</span>
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+              <span style={metricLabel}>Completed Tasks</span>
+              <span style={metricValue}>143</span>
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+              <span style={metricLabel}>Efficiency Score</span>
+              <span style={metricValue}>81.3%</span>
+            </div>
+          </div>
+        </div>
+
+        {/* Recent Activity — DevRev tickets */}
+        <div style={cardStyle('linear-gradient(135deg, #059669, #10b981)')}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', marginBottom: '1rem' }}>
+            <Clock size={16} color="#fff" />
+            <span style={{ fontSize: '0.85rem', fontWeight: 600, color: '#fff' }}>Recent Activity</span>
+          </div>
+          {recentTickets.length === 0 ? (
+            <p style={{ fontSize: '0.78rem', color: 'rgba(255,255,255,0.7)' }}>No recent activity</p>
+          ) : (
+            recentTickets.map((t, i) => (
+              <a key={i} href={`https://app.devrev.ai/${DEVREV_ORG}/works/${t.display_id}`}
+                target="_blank" rel="noopener noreferrer" style={{ display: 'block', marginBottom: '0.5rem', textDecoration: 'none' }}>
+                <div style={{ fontSize: '0.78rem', color: '#fff', fontWeight: 500 }}>
+                  {t.title?.substring(0, 50)}{t.title?.length > 50 ? '...' : ''}
+                </div>
+                <div style={{ fontSize: '0.65rem', color: 'rgba(255,255,255,0.6)' }}>
+                  {t.stage?.name} — {t.display_id}
+                </div>
+              </a>
+            ))
+          )}
+        </div>
+
+        {/* AI Insights — from Google Sheet tab "AI Projects" */}
+        <div style={cardStyle('linear-gradient(135deg, #0ea5e9, #06b6d4)')}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', marginBottom: '1rem' }}>
+            <Wand2 size={16} color="#fff" />
+            <span style={{ fontSize: '0.85rem', fontWeight: 600, color: '#fff' }}>AI Insights</span>
+          </div>
+          {aiInsightsLoading ? (
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', color: 'rgba(255,255,255,0.7)', fontSize: '0.78rem' }}>
+              <Loader2 size={14} className="spin" /> Loading insights...
+            </div>
+          ) : aiInsights.length === 0 ? (
+            <p style={{ fontSize: '0.78rem', color: 'rgba(255,255,255,0.7)', lineHeight: 1.5 }}>
+              No AI Projects data found. Add an "AI Projects" tab in your linked Google Sheet.
+            </p>
+          ) : (() => {
+            const hIdx = {};
+            aiHeaders.forEach((h, i) => { hIdx[h.toLowerCase().trim()] = i; });
+            const nameIdx = hIdx['project'] ?? hIdx['project name'] ?? hIdx['name'] ?? 0;
+            const statusIdx = hIdx['status'] ?? hIdx['state'] ?? -1;
+            const items = showAllInsights ? aiInsights : aiInsights.slice(0, 3);
+            return (
+              <>
+                {items.map((row, i) => (
+                  <div key={i} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.4rem' }}>
+                    <span style={{ fontSize: '0.78rem', color: '#fff', fontWeight: 500 }}>{row[nameIdx] || row[0]}</span>
+                    {statusIdx >= 0 && row[statusIdx] && (
+                      <span style={{ fontSize: '0.65rem', fontWeight: 600, padding: '0.12rem 0.4rem', borderRadius: '4px', background: 'rgba(255,255,255,0.2)', color: '#fff' }}>
+                        {row[statusIdx]}
+                      </span>
+                    )}
+                  </div>
+                ))}
+              </>
+            );
+          })()}
+          {aiInsights.length > 3 && (
+            <button onClick={() => setShowAllInsights(prev => !prev)} style={{
+              marginTop: '0.5rem', background: 'rgba(255,255,255,0.2)', border: 'none', color: '#fff',
+              padding: '0.35rem 0.7rem', borderRadius: '6px', fontSize: '0.75rem', fontWeight: 600, cursor: 'pointer',
+            }}>
+              {showAllInsights ? 'Show Less' : `View More Insights (${aiInsights.length - 3} more) →`}
+            </button>
+          )}
+        </div>
+      </div>
+
+      {/* Quick Actions + AI Recommendations */}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: '0.75rem' }}>
+        {/* Quick Actions */}
+        <div style={{ background: 'var(--bg-card)', borderRadius: '12px', border: '1px solid var(--border-color)', padding: '1rem' }}>
+          <h3 style={{ fontSize: '0.85rem', fontWeight: 600, color: 'var(--text-primary)', marginBottom: '0.75rem' }}>Quick Actions</h3>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.5rem' }}>
+            {[
+              { label: 'DevRev Board', icon: <Briefcase size={16} />, color: '#4f46e5', href: `https://app.devrev.ai/${DEVREV_ORG}` },
+              { label: 'Slack Channel', icon: <MessageSquare size={16} />, color: '#059669', href: `https://${SLACK_WORKSPACE}.slack.com` },
+              { label: 'Google Sheets', icon: <TableIcon size={16} />, color: '#0ea5e9', href: sheets[0]?.url },
+              { label: 'View Reports', icon: <PieChart size={16} />, color: '#7c3aed', href: '#' },
+            ].map((action, i) => (
+              <a key={i} href={action.href} target="_blank" rel="noopener noreferrer" style={{
+                display: 'flex', alignItems: 'center', gap: '0.5rem', padding: '0.65rem 0.75rem',
+                borderRadius: '8px', background: action.color + '12', border: `1px solid ${action.color}30`,
+                color: action.color, fontSize: '0.8rem', fontWeight: 600, textDecoration: 'none', cursor: 'pointer',
+              }}>
+                {action.icon} {action.label}
+              </a>
+            ))}
+          </div>
+        </div>
+
+        {/* AI Recommendations */}
+        <div style={{ background: 'var(--bg-card)', borderRadius: '12px', border: '1px solid var(--border-color)', padding: '1rem' }}>
+          <h3 style={{ fontSize: '0.85rem', fontWeight: 600, color: 'var(--text-primary)', marginBottom: '0.75rem' }}>AI Recommendations</h3>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+            <div style={{ padding: '0.6rem 0.75rem', borderRadius: '8px', background: 'var(--bg-hover)', border: '1px solid var(--border-color)' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', marginBottom: '0.2rem' }}>
+                <span style={{ fontSize: '0.7rem' }}>🎯</span>
+                <span style={{ fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-primary)' }}>Focus Time Suggestion</span>
+              </div>
+              <p style={{ fontSize: '0.72rem', color: 'var(--text-muted)', margin: 0 }}>
+                Block 2 hours tomorrow morning for deep work on active items.
+              </p>
+            </div>
+            <div style={{ padding: '0.6rem 0.75rem', borderRadius: '8px', background: 'var(--bg-hover)', border: '1px solid var(--border-color)' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', marginBottom: '0.2rem' }}>
+                <span style={{ fontSize: '0.7rem' }}>💬</span>
+                <span style={{ fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-primary)' }}>Communication Tip</span>
+              </div>
+              <p style={{ fontSize: '0.72rem', color: 'var(--text-muted)', margin: 0 }}>
+                Send follow-up on pending project requirements.
+              </p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// ─── DEPT DASHBOARD (PS-POS style — 3 sections) ──────────────────────────────────
+const DevRevOverview = ({ deptName, onLoadMore, onOpenSlack, sheets = [] }) => {
+  const [tickets, setTickets] = useState([]);
+  const [ticketsLoading, setTicketsLoading] = useState(true);
+  const [linkedSheets, setLinkedSheets] = useState([]);
+  const [sheetLoading, setSheetLoading] = useState(true);
+  const [slackMsgs, setSlackMsgs] = useState([]);
+  const [slackLoading, setSlackLoading] = useState(true);
+
+  // Section 1: Load data from all linked Google Sheets
+  useEffect(() => {
+    if (!sheets.length) { setSheetLoading(false); return; }
+    (async () => {
+      try {
+        const { importFromGoogleSheet } = await import('./lib/sheetsApi');
+        const results = [];
+        for (const s of sheets) {
+          try {
+            const tabs = await importFromGoogleSheet(s.url);
+            results.push({ label: s.label, url: s.url, tabs: tabs.filter(t => t.name !== 'Sheet1') });
+          } catch { }
+        }
+        setLinkedSheets(results);
+      } catch { setLinkedSheets([]); }
+      finally { setSheetLoading(false); }
+    })();
+  }, [sheets]);
+
+  // Section 2: DevRev tickets
+  useEffect(() => {
+    if (!DEVREV_TOKEN) { setTicketsLoading(false); return; }
+    (async () => {
+      try {
+        let allWorks = [], cursor = null;
+        do {
+          const params = new URLSearchParams({ type: 'issue', 'issue.sprint': DEVREV_SPRINT_ID, limit: '100' });
+          if (cursor) params.append('cursor', cursor);
+          const res = await fetch(`https://api.devrev.ai/works.list?${params}`, { headers: { 'Authorization': `Bearer ${DEVREV_TOKEN}` } });
+          if (!res.ok) break;
+          const data = await res.json();
+          allWorks = allWorks.concat(data.works || []);
+          cursor = data.next_cursor || null;
+          if (allWorks.length >= 500) break;
+        } while (cursor);
+        setTickets(allWorks);
+      } catch { }
+      finally { setTicketsLoading(false); }
+    })();
+  }, []);
+
+  // Section 3: Slack messages
+  useEffect(() => {
+    if (!SLACK_BOT_TOKEN || SLACK_CHANNEL_IDS.length === 0) { setSlackLoading(false); return; }
+    (async () => {
+      try {
+        let subteamId = SLACK_SUBTEAM_ID;
+        const mentionsHandle = (text) => {
+          if (!text) return false;
+          if (subteamId && text.includes(`<!subteam^${subteamId}>`)) return true;
+          return text.includes(SLACK_SEARCH_HANDLE);
+        };
+        const oldest = String(Math.floor(Date.now() / 1000) - 7 * 24 * 3600);
+        const allMatches = [];
+        for (const chId of SLACK_CHANNEL_IDS.slice(0, 3)) {
+          try {
+            const data = await slackGet('conversations.history', { channel: chId, oldest, limit: '50' });
+            (data.messages || [])
+              .filter(m => mentionsHandle(m.text) && m.type === 'message' && !m.subtype)
+              .forEach(m => allMatches.push({ ...m, _channelId: chId }));
+          } catch { }
+        }
+        setSlackMsgs(allMatches.sort((a, b) => parseFloat(b.ts) - parseFloat(a.ts)).slice(0, 5));
+      } catch { }
+      finally { setSlackLoading(false); }
+    })();
+  }, []);
+
+  const statusCounts = useMemo(() => {
+    const c = {};
+    tickets.forEach(t => { const s = t.stage?.name?.toLowerCase().replace(/\s+/g, '_') || 'unknown'; c[s] = (c[s] || 0) + 1; });
+    return c;
+  }, [tickets]);
+
+  const recentTickets = useMemo(() =>
+    [...tickets].sort((a, b) => new Date(b.modified_date || b.created_date) - new Date(a.modified_date || a.created_date)).slice(0, 5),
+  [tickets]);
+
+  // Parse project data from all linked sheets
+  // Treats merchants, projects, features, support items — anything with a name column — as "projects"
+  const projects = useMemo(() => {
+    const allTabs = linkedSheets.flatMap(s => s.tabs);
+    if (!allTabs.length) return [];
+    const all = [];
+    for (const tab of allTabs) {
+      if (!tab.headers.length || !tab.data.length) continue;
+      const hIdx = {};
+      tab.headers.forEach((h, i) => { hIdx[h.toLowerCase().trim()] = i; });
+      // Find the name column — could be project, merchant, feature, name, etc.
+      const nameIdx = hIdx['project'] ?? hIdx['project name'] ?? hIdx['merchant'] ?? hIdx['feature'] ?? hIdx['name'] ?? hIdx['support'] ?? 0;
+      const revIdx = hIdx['revenue'] ?? hIdx['amount'] ?? hIdx['value'] ?? hIdx['mrr'] ?? hIdx['arr'] ?? -1;
+      const statusIdx = hIdx['status'] ?? hIdx['state'] ?? -1;
+      const ownerIdx = hIdx['owner'] ?? hIdx['assignee'] ?? hIdx['lead'] ?? hIdx['manager'] ?? -1;
+      const typeIdx = hIdx['type'] ?? hIdx['category'] ?? -1;
+      tab.data.forEach(row => {
+        const name = row[nameIdx] || '';
+        if (!name) return;
+        all.push({
+          project: name,
+          revenue: revIdx >= 0 ? (parseFloat(String(row[revIdx] || '0').replace(/[^0-9.-]/g, '')) || 0) : 0,
+          status: statusIdx >= 0 ? (row[statusIdx] || '') : '',
+          owner: ownerIdx >= 0 ? (row[ownerIdx] || '') : '',
+          type: typeIdx >= 0 ? (row[typeIdx] || '') : tab.name,
+          source: tab.name,
+        });
+      });
+    }
+    return all;
+  }, [linkedSheets]);
+
+  const totalRevenue = useMemo(() => projects.reduce((s, p) => s + p.revenue, 0), [projects]);
+  const totalProjects = useMemo(() => new Set(projects.map(p => p.project)).size, [projects]);
+  const activeProjects = useMemo(() => new Set(projects.filter(p => p.status.toLowerCase() === 'active').map(p => p.project)).size, [projects]);
+
+  const projectWise = useMemo(() => {
+    const map = {};
+    projects.forEach(p => {
+      if (!map[p.project]) map[p.project] = { revenue: 0, status: p.status, owner: p.owner, type: p.type, entries: 0 };
+      map[p.project].revenue += p.revenue;
+      map[p.project].entries++;
+    });
+    return Object.entries(map).sort(([, a], [, b]) => b.revenue - a.revenue);
+  }, [projects]);
+
+  const statusBreakdown = useMemo(() => {
+    const map = {};
+    projects.forEach(p => { const s = p.status || 'Unknown'; map[s] = (map[s] || 0) + (p.revenue > 0 ? p.revenue : 1); });
+    return Object.entries(map).filter(([, v]) => v > 0);
+  }, [projects]);
+
+  const typeBreakdown = useMemo(() => {
+    const map = {};
+    projects.forEach(p => { const t = p.type || p.source || 'Other'; map[t] = (map[t] || 0) + 1; });
+    return Object.entries(map).sort(([, a], [, b]) => b - a);
+  }, [projects]);
+
+  const [activeTab, setActiveTab] = useState('projects');
+  const formatCurrency = (n) => n >= 10000000 ? `₹${(n / 10000000).toFixed(1)}Cr` : n >= 100000 ? `₹${(n / 100000).toFixed(1)}L` : `₹${n.toLocaleString('en-IN')}`;
+  const STATUS_COLORS = { active: '#2563eb', completed: '#059669', 'on hold': '#d97706', cancelled: '#dc2626', planned: '#7c3aed' };
+
+  const TABS = [
+    { key: 'projects', label: 'Projects', icon: <TableIcon size={15} />, count: projects.length },
+    { key: 'devrev', label: 'DevRev Tickets', icon: <Briefcase size={15} />, count: tickets.length },
+    { key: 'slack', label: 'Slack Threads', icon: <MessageSquare size={15} />, count: slackMsgs.length },
+  ];
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: '0' }}>
+
+      {/* ── Tab Bar ── */}
+      <div style={{
+        display: 'flex', gap: '0', borderBottom: '2px solid var(--border-color)',
+        marginBottom: '1rem', background: 'var(--bg-card)', borderRadius: '10px 10px 0 0',
+      }}>
+        {TABS.map(tab => (
+          <button
+            key={tab.key}
+            onClick={() => setActiveTab(tab.key)}
+            style={{
+              flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.4rem',
+              padding: '0.75rem 1rem', border: 'none', cursor: 'pointer',
+              background: activeTab === tab.key ? 'var(--bg-card)' : 'transparent',
+              borderBottom: activeTab === tab.key ? '2px solid var(--accent-primary)' : '2px solid transparent',
+              color: activeTab === tab.key ? 'var(--accent-primary)' : 'var(--text-muted)',
+              fontSize: '0.82rem', fontWeight: activeTab === tab.key ? 600 : 500,
+              transition: 'all 0.15s',
+            }}
+          >
+            {tab.icon} {tab.label}
+            {tab.count > 0 && (
+              <span style={{
+                fontSize: '0.65rem', fontWeight: 600, padding: '0.1rem 0.4rem', borderRadius: '10px',
+                background: activeTab === tab.key ? 'var(--accent-primary)' : 'var(--bg-hover)',
+                color: activeTab === tab.key ? '#fff' : 'var(--text-muted)',
+              }}>{tab.count}</span>
+            )}
+          </button>
+        ))}
+      </div>
+
+      {/* ── Projects Tab ── */}
+      {activeTab === 'projects' && (
+        <div style={{ padding: '0 0.25rem' }}>
+          {sheetLoading ? (
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', color: 'var(--text-muted)', fontSize: '0.85rem', padding: '2rem', justifyContent: 'center' }}>
+              <Loader2 size={18} className="spin" /> Loading project data...
+            </div>
+          ) : linkedSheets.length === 0 ? (
+            <div style={{ textAlign: 'center', padding: '2rem', color: 'var(--text-muted)' }}>
+              <TableIcon size={28} style={{ marginBottom: '0.5rem', opacity: 0.5 }} />
+              <p style={{ fontSize: '0.85rem' }}>No sheets linked. Click "Add Sheet" to connect a Google Sheet.</p>
+            </div>
+          ) : (
+            linkedSheets.map((sheet, si) => (
+              <div key={si}>
+                {sheet.tabs.map((tab, ti) => (
+                  <div key={ti} style={{
+                    background: 'var(--bg-card)', borderRadius: '10px', border: '1px solid var(--border-color)',
+                    padding: '1rem', marginBottom: '0.75rem',
+                  }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem' }}>
+                      <h4 style={{ fontSize: '0.85rem', fontWeight: 600, color: 'var(--text-primary)', margin: 0 }}>{tab.name}</h4>
+                      <span style={{ fontSize: '0.7rem', color: 'var(--text-muted)' }}>{tab.data.length} items</span>
+                    </div>
+                    <div style={{ overflowX: 'auto' }}>
+                      <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.78rem' }}>
+                        <thead>
+                          <tr>
+                            {tab.headers.map((h, hi) => (
+                              <th key={hi} style={{ padding: '0.4rem 0.6rem', textAlign: 'left', fontWeight: 600, color: 'var(--text-secondary)', borderBottom: '2px solid var(--border-color)', whiteSpace: 'nowrap', fontSize: '0.72rem' }}>{h}</th>
+                            ))}
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {tab.data.slice(0, 10).map((row, ri) => (
+                            <tr key={ri} style={{ background: ri % 2 === 0 ? 'transparent' : 'var(--bg-hover)' }}>
+                              {row.map((cell, ci) => (
+                                <td key={ci} style={{ padding: '0.4rem 0.6rem', borderBottom: '1px solid var(--border-color)', color: 'var(--text-primary)', whiteSpace: 'nowrap', maxWidth: '220px', overflow: 'hidden', textOverflow: 'ellipsis' }}>{cell}</td>
+                              ))}
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                      {tab.data.length > 10 && (
+                        <button onClick={() => window.open(sheet.url, '_blank')} style={{
+                          width: '100%', marginTop: '0.5rem', padding: '0.4rem', borderRadius: '6px',
+                          border: '1px solid var(--border-color)', background: 'var(--bg-hover)',
+                          color: 'var(--accent-primary)', fontSize: '0.75rem', fontWeight: 600,
+                          cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.3rem',
+                        }}>
+                          +{tab.data.length - 10} more — Open Sheet
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ))
+          )}
+        </div>
+      )}
+
+      {/* ── DevRev Tab ── */}
+      {activeTab === 'devrev' && (
+        <div style={{ padding: '0 0.25rem' }}>
+          {ticketsLoading ? (
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', color: 'var(--text-muted)', fontSize: '0.85rem', padding: '2rem', justifyContent: 'center' }}>
+              <Loader2 size={18} className="spin" /> Syncing tickets...
+            </div>
+          ) : !DEVREV_TOKEN ? (
+            <div style={{ textAlign: 'center', padding: '2rem', color: 'var(--text-muted)' }}>
+              <Briefcase size={28} style={{ marginBottom: '0.5rem', opacity: 0.5 }} />
+              <p style={{ fontSize: '0.85rem' }}>DevRev not configured. Set VITE_DEVREV_TOKEN in .env.</p>
+            </div>
+          ) : (
+            <div style={{ background: 'var(--bg-card)', borderRadius: '10px', border: '1px solid var(--border-color)', padding: '1rem' }}>
+              <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap', marginBottom: '0.75rem' }}>
+                <span style={{ padding: '0.25rem 0.6rem', borderRadius: '6px', background: '#dbeafe', color: '#1d4ed8', fontSize: '0.75rem', fontWeight: 600 }}>Total: {tickets.length}</span>
+                {Object.entries(DEVREV_STATUS_STYLES).map(([key, style]) => {
+                  const count = statusCounts[key];
+                  if (!count) return null;
+                  return <span key={key} style={{ padding: '0.25rem 0.6rem', borderRadius: '6px', background: style.bg, color: style.color, fontSize: '0.75rem', fontWeight: 600 }}>{style.label}: {count}</span>;
+                })}
+              </div>
+              {recentTickets.map(t => {
+                const stage = t.stage?.name?.toLowerCase().replace(/\s+/g, '_') || 'unknown';
+                const statusStyle = DEVREV_STATUS_STYLES[stage] || { bg: '#f3f4f6', color: '#6b7280', label: t.stage?.name || 'Unknown' };
+                const prioStyle = DEVREV_PRIORITY_STYLES[t.priority?.toLowerCase()] || {};
+                return (
+                  <a key={t.id} href={`https://app.devrev.ai/${DEVREV_ORG}/works/${t.display_id}`} target="_blank" rel="noopener noreferrer"
+                    style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', padding: '0.4rem 0', borderBottom: '1px solid var(--border-color)', textDecoration: 'none', color: 'inherit' }}>
+                    <span style={{ fontSize: '0.7rem', fontWeight: 600, color: 'var(--text-muted)', minWidth: '55px' }}>{t.display_id}</span>
+                    <span style={{ flex: 1, fontSize: '0.78rem', color: 'var(--text-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{t.title}</span>
+                    {prioStyle.label && <span style={{ padding: '0.12rem 0.35rem', borderRadius: '4px', background: prioStyle.bg, color: prioStyle.color, fontSize: '0.65rem', fontWeight: 600 }}>{prioStyle.label}</span>}
+                    <span style={{ padding: '0.12rem 0.35rem', borderRadius: '4px', background: statusStyle.bg, color: statusStyle.color, fontSize: '0.65rem', fontWeight: 600 }}>{statusStyle.label}</span>
+                  </a>
+                );
+              })}
+              <button onClick={onLoadMore} style={{
+                width: '100%', marginTop: '0.75rem', padding: '0.5rem', borderRadius: '8px',
+                border: '1px solid var(--border-color)', background: 'var(--bg-hover)',
+                color: 'var(--accent-primary)', fontSize: '0.8rem', fontWeight: 600,
+                cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.4rem',
+              }}>
+                <Briefcase size={14} /> Load More
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ── Slack Tab ── */}
+      {activeTab === 'slack' && (
+        <div style={{ padding: '0 0.25rem' }}>
+          {slackLoading ? (
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', color: 'var(--text-muted)', fontSize: '0.85rem', padding: '2rem', justifyContent: 'center' }}>
+              <Loader2 size={18} className="spin" /> Scanning channels...
+            </div>
+          ) : slackMsgs.length === 0 ? (
+            <div style={{ textAlign: 'center', padding: '2rem', color: 'var(--text-muted)' }}>
+              <MessageSquare size={28} style={{ marginBottom: '0.5rem', opacity: 0.5 }} />
+              <p style={{ fontSize: '0.85rem' }}>No recent @{SLACK_SEARCH_HANDLE} mentions in the last 7 days.</p>
+            </div>
+          ) : (
+            <div style={{ background: 'var(--bg-card)', borderRadius: '10px', border: '1px solid var(--border-color)', padding: '1rem' }}>
+              {slackMsgs.map((m, i) => (
+                <a key={i} href={`https://${SLACK_WORKSPACE}.slack.com/archives/${m._channelId}/p${m.ts.replace('.', '')}`}
+                  target="_blank" rel="noopener noreferrer"
+                  style={{ display: 'block', padding: '0.5rem 0', borderBottom: '1px solid var(--border-color)', textDecoration: 'none', color: 'inherit' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '0.2rem' }}>
+                    <span style={{ fontSize: '0.7rem', color: 'var(--text-muted)' }}>
+                      {(() => { try { return format(new Date(parseFloat(m.ts) * 1000), 'MMM d, h:mm a'); } catch { return ''; } })()}
+                    </span>
+                  </div>
+                  <p style={{ fontSize: '0.78rem', color: 'var(--text-primary)', margin: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    {slackStripMarkup(m.text).substring(0, 120)}
+                  </p>
+                </a>
+              ))}
+              <button onClick={onOpenSlack} style={{
+                width: '100%', marginTop: '0.75rem', padding: '0.5rem', borderRadius: '8px',
+                border: '1px solid var(--border-color)', background: 'var(--bg-hover)',
+                color: 'var(--accent-primary)', fontSize: '0.8rem', fontWeight: 600,
+                cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.4rem',
+              }}>
+                <MessageSquare size={14} /> Load More
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+};
+
+// ─── PS TEAM HEALTH & ENGAGEMENT ──────────────────────────────────
+const PSTeamHealth = () => {
+  const [tickets, setTickets] = useState([]);
+  const [slackMsgs, setSlackMsgs] = useState([]);
+  const [slackEngagement, setSlackEngagement] = useState({});
+  const [ticketsLoading, setTicketsLoading] = useState(true);
+  const [slackLoading, setSlackLoading] = useState(true);
+
+  useEffect(() => {
+    if (!DEVREV_TOKEN) { setTicketsLoading(false); return; }
+    (async () => {
+      try {
+        let allWorks = [], cursor = null;
+        do {
+          const params = new URLSearchParams({ type: 'issue', 'issue.sprint': DEVREV_SPRINT_ID, limit: '100' });
+          if (cursor) params.append('cursor', cursor);
+          const res = await fetch(`https://api.devrev.ai/works.list?${params}`, { headers: { 'Authorization': `Bearer ${DEVREV_TOKEN}` } });
+          if (!res.ok) break;
+          const data = await res.json();
+          allWorks = allWorks.concat(data.works || []);
+          cursor = data.next_cursor || null;
+          if (allWorks.length >= 500) break;
+        } while (cursor);
+        setTickets(allWorks);
+      } catch { }
+      finally { setTicketsLoading(false); }
+    })();
+  }, []);
+
+  useEffect(() => {
+    if (!SLACK_BOT_TOKEN || SLACK_CHANNEL_IDS.length === 0) { setSlackLoading(false); return; }
+    (async () => {
+      try {
+        let subteamId = SLACK_SUBTEAM_ID;
+        const mentionsHandle = (text) => {
+          if (!text) return false;
+          if (subteamId && text.includes(`<!subteam^${subteamId}>`)) return true;
+          return text.includes(SLACK_SEARCH_HANDLE);
+        };
+        const oldest = String(Math.floor(Date.now() / 1000) - 7 * 24 * 3600);
+        const allMatches = [];
+        const engagement = {};
+        for (const chId of SLACK_CHANNEL_IDS.slice(0, 5)) {
+          try {
+            const data = await slackGet('conversations.history', { channel: chId, oldest, limit: '50' });
+            const tagged = (data.messages || []).filter(m => mentionsHandle(m.text) && m.type === 'message' && !m.subtype);
+            tagged.forEach(m => allMatches.push({ ...m, _channelId: chId }));
+            for (const msg of tagged.slice(0, 10)) {
+              if ((msg.reply_count || 0) > 0) {
+                try {
+                  const rd = await slackGet('conversations.replies', { channel: chId, ts: msg.ts, limit: '50' });
+                  (rd.messages || []).slice(1).forEach(reply => {
+                    const user = reply.user || 'unknown';
+                    if (!engagement[user]) engagement[user] = { replies: 0, threads: 0, avgResponseTime: 0, responseTimes: [] };
+                    engagement[user].replies++;
+                    if (!engagement[user]._threads) engagement[user]._threads = new Set();
+                    engagement[user]._threads.add(msg.ts);
+                    const responseTime = (parseFloat(reply.ts) - parseFloat(msg.ts)) / 60;
+                    engagement[user].responseTimes.push(responseTime);
+                  });
+                } catch { }
+              }
+            }
+          } catch { }
+        }
+        Object.values(engagement).forEach(e => {
+          e.threads = e._threads ? e._threads.size : 0;
+          e.avgResponseTime = e.responseTimes.length > 0 ? Math.round(e.responseTimes.reduce((a, b) => a + b, 0) / e.responseTimes.length) : 0;
+          delete e._threads;
+          delete e.responseTimes;
+        });
+        setSlackMsgs(allMatches);
+        setSlackEngagement(engagement);
+      } catch { }
+      finally { setSlackLoading(false); }
+    })();
+  }, []);
+
+  const memberWorkload = useMemo(() => {
+    const map = {};
+    tickets.forEach(t => {
+      (t.owned_by || []).forEach(o => {
+        if (o.display_name === 'Unassigned' || o.type === 'service_account') return;
+        const name = o.display_name || o.full_name || 'Unknown';
+        const email = o.email || '';
+        if (!map[name]) map[name] = { name, email, active: 0, total: 0 };
+        map[name].total++;
+        if (!['completed', 'done', 'wont_fix', 'archived'].includes(t.stage?.name?.toLowerCase())) map[name].active++;
+      });
+    });
+    return Object.values(map).sort((a, b) => b.active - a.active);
+  }, [tickets]);
+
+  const maxWorkload = memberWorkload.length > 0 ? Math.max(...memberWorkload.map(m => m.total)) : 1;
+  const avgWorkload = memberWorkload.length > 0 ? (memberWorkload.reduce((s, m) => s + m.active, 0) / memberWorkload.length).toFixed(1) : 0;
+  const totalSlackMentions = slackMsgs.length;
+  const attendance = memberWorkload.length > 0 ? Math.round((memberWorkload.filter(m => m.active > 0).length / memberWorkload.length) * 100) : 0;
+
+  const getHealthStatus = (m) => {
+    const ratio = m.active / maxWorkload;
+    if (ratio > 0.7) return { label: 'Heavy Workload', color: '#d97706', bg: '#fef3c7' };
+    if (ratio > 0.3) return { label: 'Good', color: '#059669', bg: '#d1fae5' };
+    if (m.active === 0) return { label: 'Idle', color: '#6b7280', bg: '#f3f4f6' };
+    return { label: 'Light', color: '#2563eb', bg: '#dbeafe' };
+  };
+
+  const statCard = (icon, label, value, color) => (
+    <div style={{ padding: '1rem', borderRadius: '12px', background: 'var(--bg-card)', border: '1px solid var(--border-color)', textAlign: 'center' }}>
+      <div style={{ width: 36, height: 36, borderRadius: '10px', background: color + '18', display: 'flex', alignItems: 'center', justifyContent: 'center', margin: '0 auto 0.5rem', color }}>
+        {icon}
+      </div>
+      <div style={{ fontSize: '0.65rem', color: 'var(--text-muted)', marginBottom: '0.2rem' }}>{label}</div>
+      <div style={{ fontSize: '1.4rem', fontWeight: 700, color: 'var(--text-primary)' }}>{value}</div>
+    </div>
+  );
+
+  if (ticketsLoading && slackLoading) return (
+    <div className="dashboard-container" style={{ padding: '1.5rem' }}>
+      <div className="loading-state"><Loader2 size={32} className="spin" /><p>Loading team health data...</p></div>
+    </div>
+  );
+
+  return (
+    <div className="dashboard-container" style={{ padding: '1.5rem' }}>
+      <h2 style={{ fontSize: '1.25rem', fontWeight: 600, marginBottom: '0.25rem' }}>Team Health & Engagement Metrics</h2>
+      <p style={{ fontSize: '0.85rem', color: 'var(--text-muted)', marginBottom: '1.25rem' }}>Monitor team wellbeing, collaboration, and engagement levels across your organization.</p>
+
+      {/* Stats Cards */}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '0.75rem', marginBottom: '1.25rem' }}>
+        {statCard(<CheckCircle size={18} />, 'Team Mood', `${Math.min(10, (attendance / 10)).toFixed(1)}/10`, '#059669')}
+        {statCard(<Users size={18} />, 'Active', `${attendance}%`, '#2563eb')}
+        {statCard(<MessageSquare size={18} />, 'Slack Mentions', totalSlackMentions, '#7c3aed')}
+        {statCard(<Briefcase size={18} />, 'Avg Workload', avgWorkload, '#d97706')}
+      </div>
+
+      {/* Engagement Trends + Wellbeing Indicators */}
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.75rem', marginBottom: '1.25rem' }}>
+        {/* Engagement Trends */}
+        <div style={{ background: 'var(--bg-card)', borderRadius: '12px', border: '1px solid var(--border-color)', padding: '1rem' }}>
+          <h3 style={{ fontSize: '0.85rem', fontWeight: 600, marginBottom: '1rem', color: 'var(--text-primary)' }}>Engagement Trends</h3>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+            {memberWorkload.map((m, i) => (
+              <div key={i} style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                <span style={{ fontSize: '0.72rem', color: 'var(--text-primary)', minWidth: '100px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{m.name}</span>
+                <div style={{ flex: 1, height: 8, borderRadius: 4, background: 'var(--bg-hover)', overflow: 'hidden' }}>
+                  <div style={{ height: '100%', borderRadius: 4, width: `${(m.total / maxWorkload) * 100}%`, background: ['#059669', '#2563eb', '#d97706', '#7c3aed', '#0ea5e9'][i % 5] }} />
+                </div>
+                <span style={{ fontSize: '0.7rem', color: 'var(--text-muted)', minWidth: '20px' }}>{m.total}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* Wellbeing Indicators — Slack thread engagement */}
+        <div style={{ background: 'var(--bg-card)', borderRadius: '12px', border: '1px solid var(--border-color)', padding: '1rem' }}>
+          <h3 style={{ fontSize: '0.85rem', fontWeight: 600, marginBottom: '1rem', color: 'var(--text-primary)' }}>Wellbeing Indicators</h3>
+          {slackLoading ? (
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', color: 'var(--text-muted)', fontSize: '0.8rem' }}>
+              <Loader2 size={14} className="spin" /> Scanning Slack threads...
+            </div>
+          ) : Object.keys(slackEngagement).length === 0 ? (
+            <p style={{ fontSize: '0.78rem', color: 'var(--text-muted)' }}>No thread replies found in the last 7 days.</p>
+          ) : (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.6rem' }}>
+              {Object.entries(slackEngagement).sort(([,a],[,b]) => b.replies - a.replies).map(([userId, data], i) => {
+                const maxReplies = Math.max(...Object.values(slackEngagement).map(e => e.replies));
+                const engagementPct = Math.round((data.replies / maxReplies) * 100);
+                return (
+                  <div key={userId}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '0.2rem' }}>
+                      <span style={{ fontSize: '0.72rem', color: 'var(--text-primary)' }}>{userId}</span>
+                      <span style={{ fontSize: '0.65rem', color: 'var(--text-muted)' }}>
+                        {data.replies} replies · {data.threads} threads · ~{data.avgResponseTime}m avg
+                      </span>
+                    </div>
+                    <div style={{ height: 6, borderRadius: 3, background: 'var(--bg-hover)', overflow: 'hidden' }}>
+                      <div style={{ height: '100%', borderRadius: 3, width: `${engagementPct}%`, background: ['#059669', '#2563eb', '#d97706', '#7c3aed', '#ef4444'][i % 5] }} />
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Team Member Status */}
+      <div style={{ background: 'var(--bg-card)', borderRadius: '12px', border: '1px solid var(--border-color)', padding: '1rem' }}>
+        <h3 style={{ fontSize: '0.85rem', fontWeight: 600, marginBottom: '0.75rem', color: 'var(--text-primary)' }}>Team Member Status</h3>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))', gap: '0.75rem' }}>
+          {memberWorkload.map((m, i) => {
+            const health = getHealthStatus(m);
+            return (
+              <div key={i} style={{ padding: '0.75rem', borderRadius: '10px', background: 'var(--bg-hover)', border: '1px solid var(--border-color)' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.4rem' }}>
+                  <div style={{
+                    width: 32, height: 32, borderRadius: '50%',
+                    background: ['#4f46e5', '#059669', '#d97706', '#0ea5e9', '#7c3aed'][i % 5],
+                    color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center',
+                    fontSize: '0.75rem', fontWeight: 700,
+                  }}>
+                    {m.name.split(' ').map(n => n[0]).join('').substring(0, 2)}
+                  </div>
+                  <div style={{ flex: 1 }}>
+                    <div style={{ fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-primary)' }}>{m.name}</div>
+                    <span style={{ fontSize: '0.65rem', fontWeight: 600, padding: '0.1rem 0.35rem', borderRadius: '4px', background: health.bg, color: health.color }}>{health.label}</span>
+                  </div>
+                </div>
+                <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)' }}>
+                  {m.active} active · {m.total} total tickets
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// ─── PS PRODUCTIVITY & TEAM METRICS ──────────────────────────────────
+const PSProductivityMetrics = () => {
+  const [tickets, setTickets] = useState([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    if (!DEVREV_TOKEN) { setLoading(false); return; }
+    (async () => {
+      try {
+        let allWorks = [], cursor = null;
+        do {
+          const params = new URLSearchParams({ type: 'issue', 'issue.sprint': DEVREV_SPRINT_ID, limit: '100' });
+          if (cursor) params.append('cursor', cursor);
+          const res = await fetch(`https://api.devrev.ai/works.list?${params}`, { headers: { 'Authorization': `Bearer ${DEVREV_TOKEN}` } });
+          if (!res.ok) break;
+          const data = await res.json();
+          allWorks = allWorks.concat(data.works || []);
+          cursor = data.next_cursor || null;
+          if (allWorks.length >= 500) break;
+        } while (cursor);
+        setTickets(allWorks);
+      } catch { }
+      finally { setLoading(false); }
+    })();
+  }, []);
+
+  const active = useMemo(() => tickets.filter(t => !['completed', 'done', 'wont_fix', 'archived'].includes(t.stage?.name?.toLowerCase())), [tickets]);
+
+  const sprintInfo = useMemo(() => {
+    const t = tickets.find(t => t.sprint);
+    if (!t?.sprint) return null;
+    return { name: t.sprint.name, start: t.sprint.start_date, end: t.sprint.end_date, state: t.sprint.state };
+  }, [tickets]);
+
+  const isTicketCompleted = useCallback((t) => {
+    const hasUnassigned = (t.owned_by || []).some(o => o.display_name === 'Unassigned' || o.type === 'service_account');
+    const hasDoneStage = ['completed', 'done'].includes(t.stage?.name?.toLowerCase());
+    return hasUnassigned || hasDoneStage;
+  }, []);
+
+  const memberStats = useMemo(() => {
+    const map = {};
+    tickets.forEach(t => {
+      (t.owned_by || []).forEach(o => {
+        if (o.display_name === 'Unassigned' || o.type === 'service_account') return;
+        const name = o.display_name || o.full_name || 'Unknown';
+        const email = o.email || '';
+        if (!map[name]) map[name] = { name, email, total: 0 };
+        map[name].total++;
+      });
+    });
+    return Object.values(map).sort((a, b) => b.total - a.total);
+  }, [tickets]);
+
+  const completedByCreator = useMemo(() => {
+    return tickets.filter(isTicketCompleted).length;
+  }, [tickets]);
+
+  const completionRate = tickets.length > 0 ? Math.round((completedByCreator / tickets.length) * 1000) / 10 : 0;
+
+  const maxTickets = memberStats.length > 0 ? Math.max(...memberStats.map(m => m.total)) : 1;
+
+  const statCard = (icon, label, value, color) => (
+    <div style={{ padding: '1rem', borderRadius: '12px', background: 'var(--bg-card)', border: '1px solid var(--border-color)', textAlign: 'center' }}>
+      <div style={{ width: 36, height: 36, borderRadius: '10px', background: color + '18', display: 'flex', alignItems: 'center', justifyContent: 'center', margin: '0 auto 0.5rem', color }}>
+        {icon}
+      </div>
+      <div style={{ fontSize: '0.65rem', color: 'var(--text-muted)', marginBottom: '0.2rem' }}>{label}</div>
+      <div style={{ fontSize: '1.4rem', fontWeight: 700, color: 'var(--text-primary)' }}>{value}</div>
+    </div>
+  );
+
+  if (loading) return (
+    <div className="dashboard-container" style={{ padding: '1.5rem' }}>
+      <div className="loading-state"><Loader2 size={32} className="spin" /><p>Loading DevRev data...</p></div>
+    </div>
+  );
+
+  return (
+    <div className="dashboard-container" style={{ padding: '1.5rem' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '1.25rem' }}>
+        <div>
+          <h2 style={{ fontSize: '1.25rem', fontWeight: 600, marginBottom: '0.25rem' }}>Productivity & Team Metrics</h2>
+          <p style={{ fontSize: '0.85rem', color: 'var(--text-muted)', margin: 0 }}>Track performance, analyze productivity patterns, and optimize team efficiency.</p>
+        </div>
+        {sprintInfo && (
+          <div style={{ padding: '0.5rem 0.75rem', borderRadius: '8px', background: 'var(--bg-hover)', border: '1px solid var(--border-color)', textAlign: 'right' }}>
+            <div style={{ fontSize: '0.8rem', fontWeight: 600, color: 'var(--accent-primary)' }}>{sprintInfo.name}</div>
+            <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)' }}>
+              {format(new Date(sprintInfo.start), 'MMM d')} — {format(new Date(sprintInfo.end), 'MMM d, yyyy')}
+            </div>
+            <span style={{
+              fontSize: '0.6rem', fontWeight: 600, padding: '0.1rem 0.35rem', borderRadius: '4px',
+              background: sprintInfo.state === 'active' ? '#d1fae5' : '#f3f4f6',
+              color: sprintInfo.state === 'active' ? '#059669' : '#6b7280',
+            }}>{sprintInfo.state}</span>
+          </div>
+        )}
+      </div>
+
+      {/* Stats Cards */}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '0.75rem', marginBottom: '1.25rem' }}>
+        {statCard(<CheckCircle size={18} />, 'Completed', completedByCreator, '#059669')}
+        {statCard(<Clock size={18} />, 'In Progress', active.length, '#2563eb')}
+        {statCard(<PieChart size={18} />, 'Completion Rate', `${completionRate}%`, '#7c3aed')}
+        {statCard(<Users size={18} />, 'Team Members', `${memberStats.length}`, '#d97706')}
+      </div>
+
+      {/* DevRev Team Stats + Work Distribution */}
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.75rem', marginBottom: '1.25rem' }}>
+        {/* Team Statistics */}
+        <div style={{ background: 'var(--bg-card)', borderRadius: '12px', border: '1px solid var(--border-color)', padding: '1rem' }}>
+          <h3 style={{ fontSize: '0.85rem', fontWeight: 600, marginBottom: '1rem', color: 'var(--text-primary)' }}>DevRev Team Statistics</h3>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.6rem' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.8rem' }}>
+                <span style={{ color: 'var(--text-muted)' }}>Total Completed</span>
+                <span style={{ fontWeight: 600, color: 'var(--text-primary)' }}>{completedByCreator}</span>
+              </div>
+              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.8rem' }}>
+                <span style={{ color: 'var(--text-muted)' }}>Completion Rate</span>
+                <span style={{ fontWeight: 600, color: 'var(--text-primary)' }}>{completionRate}%</span>
+              </div>
+              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.8rem' }}>
+                <span style={{ color: 'var(--text-muted)' }}>Members Found</span>
+                <span style={{ fontWeight: 600, color: 'var(--text-primary)' }}>{memberStats.length}</span>
+              </div>
+          </div>
+        </div>
+
+        {/* Team Work Distribution */}
+        <div style={{ background: 'var(--bg-card)', borderRadius: '12px', border: '1px solid var(--border-color)', padding: '1rem' }}>
+          <h3 style={{ fontSize: '0.85rem', fontWeight: 600, marginBottom: '1rem', color: 'var(--text-primary)' }}>Team Work Distribution</h3>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+            {memberStats.slice(0, 5).map((m, i) => (
+              <div key={i} style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                <span style={{ fontSize: '0.75rem', color: 'var(--text-primary)', minWidth: '30px', textAlign: 'right' }}>{m.total}</span>
+                <div style={{ flex: 1, height: 8, borderRadius: 4, background: 'var(--bg-hover)', overflow: 'hidden' }}>
+                  <div style={{ height: '100%', borderRadius: 4, width: `${(m.total / maxTickets) * 100}%`, background: ['#4f46e5', '#059669', '#d97706', '#0ea5e9', '#7c3aed'][i % 5] }} />
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      {/* Team Members Details */}
+      <div style={{ background: 'var(--bg-card)', borderRadius: '12px', border: '1px solid var(--border-color)', padding: '1rem' }}>
+        <h3 style={{ fontSize: '0.85rem', fontWeight: 600, marginBottom: '0.75rem', color: 'var(--text-primary)' }}>Team Members Details</h3>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))', gap: '0.75rem' }}>
+          {memberStats.map((m, i) => (
+            <div key={i} style={{ padding: '0.75rem', borderRadius: '10px', background: 'var(--bg-hover)', border: '1px solid var(--border-color)' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.4rem' }}>
+                <div style={{
+                  width: 32, height: 32, borderRadius: '50%',
+                  background: ['#4f46e5', '#059669', '#d97706', '#0ea5e9', '#7c3aed'][i % 5],
+                  color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  fontSize: '0.75rem', fontWeight: 700,
+                }}>
+                  {m.name.split(' ').map(n => n[0]).join('').substring(0, 2)}
+                </div>
+                <div>
+                  <div style={{ fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-primary)' }}>{m.name}</div>
+                  {m.email && <div style={{ fontSize: '0.65rem', color: 'var(--text-muted)' }}>{m.email}</div>}
+                </div>
+              </div>
+              <div style={{ display: 'flex', gap: '0.5rem', fontSize: '0.7rem', color: 'var(--text-muted)' }}>
+                <span>{m.total} assigned</span>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+};
+
+const Dashboard = ({ rosterData, currentDate, onChangeDate, loading, headerAction, deptName, isSheetsEnabled, onOpenDevRev, onOpenSlack, sheets }) => {
   const [viewDate, setViewDate] = useState(new Date());
   const isViewingToday = format(viewDate, 'yyyy-MM-dd') === format(new Date(), 'yyyy-MM-dd');
 
@@ -381,7 +1345,9 @@ const Dashboard = ({ rosterData, currentDate, onChangeDate, loading, headerActio
         {headerAction}
       </div>
 
-      {loading ? (
+      {isSheetsEnabled ? (
+        <PSDashboardHome deptName={deptName} sheets={sheets} />
+      ) : loading ? (
         <div className="loading-state">
           <Loader2 size={32} className="spin" />
           <p>Loading roster data...</p>
@@ -1816,6 +2782,139 @@ const SlackThreadsModal = ({ onClose }) => {
 };
 
 // ─── DRIVE SHEET MODAL ──────────────────────────────────
+// ─── LINK / CREATE SHEET MODAL ──────────────────────────────────
+const LinkSheetModal = ({ deptName, deptId, onClose, onDone, onGlobalLoading }) => {
+  const [mode, setMode] = useState('link');
+  const [sheetUrl, setSheetUrl] = useState('');
+  const [sheetLabel, setSheetLabel] = useState('');
+  const [newSheetName, setNewSheetName] = useState(`${deptName} Roster Db`);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+
+  const appendSheetToDept = async (sheetId) => {
+    const { appendSheetIdToDept } = await import('./lib/sheetsApi');
+    await appendSheetIdToDept(deptId, sheetId);
+  };
+
+  const handleLinkSheet = async () => {
+    if (!sheetUrl.trim()) return;
+    onClose();
+    onGlobalLoading?.(`Linking sheet to ${deptName}...`);
+    try {
+      const { extractSpreadsheetId } = await import('./lib/sheetsApi');
+      const id = extractSpreadsheetId(sheetUrl.trim());
+      console.log('[LinkSheet] extracted id:', id, 'from url:', sheetUrl.trim());
+      if (!id) throw new Error('Invalid Google Sheets URL');
+      console.log('[LinkSheet] calling appendSheetToDept with deptId:', deptId, 'sheetId:', id);
+      await appendSheetToDept(id);
+      console.log('[LinkSheet] success');
+      onDone?.();
+    } catch (err) {
+      console.error('[LinkSheet] failed:', err);
+      alert('Failed to link sheet: ' + err.message);
+    } finally {
+      onGlobalLoading?.(null);
+    }
+  };
+
+  const handleCreateSheet = async () => {
+    if (!newSheetName.trim()) return;
+    onClose();
+    onGlobalLoading?.(`Creating "${newSheetName.trim()}"...`);
+    try {
+      const { createDriveSheetForDept } = await import('./lib/api');
+      const result = await createDriveSheetForDept(deptId, newSheetName.trim(), []);
+      await appendSheetToDept(result.spreadsheetId);
+      onDone?.();
+    } catch (err) {
+      console.error('Create sheet failed', err);
+    } finally {
+      onGlobalLoading?.(null);
+    }
+  };
+
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div className="modal-content" onClick={e => e.stopPropagation()} style={{ maxWidth: '480px' }}>
+        <div className="modal-header">
+          <h2 style={{ fontSize: '1.1rem', fontWeight: 600 }}>
+            <TableIcon size={18} style={{ verticalAlign: 'middle', marginRight: '0.5rem' }} />
+            Add Sheet — {deptName}
+          </h2>
+          <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-muted)' }}>
+            <X size={20} />
+          </button>
+        </div>
+
+        {/* Mode toggle */}
+        <div style={{ display: 'flex', gap: '0.5rem', margin: '1rem 0' }}>
+          <button
+            onClick={() => setMode('link')}
+            style={{
+              flex: 1, padding: '0.6rem', borderRadius: '8px', border: '1px solid',
+              borderColor: mode === 'link' ? 'var(--accent-primary)' : 'var(--border-color)',
+              background: mode === 'link' ? 'var(--accent-primary)' : 'var(--bg-secondary)',
+              color: mode === 'link' ? '#fff' : 'var(--text-primary)',
+              fontSize: '0.85rem', fontWeight: 600, cursor: 'pointer',
+            }}
+          >
+            Paste Existing Link
+          </button>
+          <button
+            onClick={() => setMode('create')}
+            style={{
+              flex: 1, padding: '0.6rem', borderRadius: '8px', border: '1px solid',
+              borderColor: mode === 'create' ? 'var(--accent-primary)' : 'var(--border-color)',
+              background: mode === 'create' ? 'var(--accent-primary)' : 'var(--bg-secondary)',
+              color: mode === 'create' ? '#fff' : 'var(--text-primary)',
+              fontSize: '0.85rem', fontWeight: 600, cursor: 'pointer',
+            }}
+          >
+            Create New Sheet
+          </button>
+        </div>
+
+        {mode === 'link' && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+            <input
+              className="form-input"
+              value={sheetUrl}
+              onChange={e => setSheetUrl(e.target.value)}
+              placeholder="Paste Google Sheets URL..."
+              style={{ fontSize: '0.85rem' }}
+            />
+            <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: '0.5rem' }}>
+              <button className="btn btn-primary" onClick={handleLinkSheet} disabled={!sheetUrl.trim()}>
+                <PlusCircle size={14} /> Link Sheet
+              </button>
+            </div>
+          </div>
+        )}
+
+        {mode === 'create' && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+            <input
+              className="form-input"
+              value={newSheetName}
+              onChange={e => setNewSheetName(e.target.value)}
+              placeholder="Sheet name..."
+              style={{ fontSize: '0.85rem' }}
+            />
+            <p style={{ fontSize: '0.75rem', color: 'var(--text-muted)', margin: 0 }}>
+              Creates a new Google Spreadsheet in your Drive and links it to {deptName}.
+            </p>
+            <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: '0.5rem' }}>
+              <button className="btn btn-primary" onClick={handleCreateSheet} disabled={!newSheetName.trim()}>
+                <PlusCircle size={14} /> Create & Link
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+};
+
 const DriveSheetModal = ({ deptName, deptId, onClose, onCreated }) => {
   const [tabs, setTabs] = useState([{ name: '', source: 'manual', headers: '', data: '', url: '', importing: false, imported: false }]);
   const [prompt, setPrompt] = useState('');
@@ -2472,7 +3571,7 @@ const AdminManager = ({ onClose, departments, userRole }) => {
 };
 
 // 3b. DEPARTMENT MANAGER MODAL
-const DepartmentManager = ({ onClose, onDepartmentCreated }) => {
+const DepartmentManager = ({ onClose, onDepartmentCreated, onGlobalLoading }) => {
   const [departments, setDepartments] = useState([]);
   const [loading, setLoading] = useState(true);
   const [newName, setNewName] = useState('');
@@ -2500,19 +3599,17 @@ const DepartmentManager = ({ onClose, onDepartmentCreated }) => {
   const handleCreate = async (e) => {
     e.preventDefault();
     if (!newName.trim()) return;
-    setSaving(true);
-    setError('');
+    const name = newName.trim();
+    const slug = newSlug.trim() || name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
+    onClose();
+    onGlobalLoading?.(`Creating department "${name}"...`);
     try {
-      const slug = newSlug.trim() || newName.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
-      await createDepartment(newName.trim(), slug);
-      setNewName('');
-      setNewSlug('');
-      await loadDepartments();
+      await createDepartment(name, slug);
       if (onDepartmentCreated) onDepartmentCreated();
     } catch (err) {
-      setError(err.message || 'Failed to create department');
+      console.error('Failed to create department', err);
     } finally {
-      setSaving(false);
+      onGlobalLoading?.(null);
     }
   };
 
@@ -3814,6 +4911,9 @@ function AuthenticatedApp({ onLogout }) {
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [showAdminManager, setShowAdminManager] = useState(false);
   const [showDeptManager, setShowDeptManager] = useState(false);
+  const [showLinkSheet, setShowLinkSheet] = useState(false);
+  const [globalLoading, setGlobalLoading] = useState(null);
+  const [dashboardKey, setDashboardKey] = useState(0);
   const [currentDate, setCurrentDate] = useState(new Date());
 
   // Department state
@@ -4082,6 +5182,21 @@ function AuthenticatedApp({ onLogout }) {
 
   return (
     <div className="app-layout">
+      {/* Global Loading Overlay */}
+      {globalLoading && (
+        <div style={{
+          position: 'fixed', inset: 0, zIndex: 9999, background: 'rgba(0,0,0,0.4)',
+          display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: '1rem',
+        }}>
+          <div style={{
+            background: 'var(--bg-card)', borderRadius: '16px', padding: '2rem 3rem',
+            boxShadow: 'var(--shadow-lg)', textAlign: 'center',
+          }}>
+            <Loader2 size={36} className="spin" style={{ color: 'var(--accent-primary)', marginBottom: '0.75rem' }} />
+            <p style={{ fontSize: '0.9rem', fontWeight: 500, color: 'var(--text-primary)', margin: 0 }}>{globalLoading}</p>
+          </div>
+        </div>
+      )}
       {/* Toast */}
       {toast && <Toast message={toast.message} type={toast.type} onClose={() => setToast(null)} />}
 
@@ -4149,55 +5264,62 @@ function AuthenticatedApp({ onLogout }) {
         </button>
 
         <nav className="sidebar-nav" style={{ marginTop: '1rem' }}>
-          <button
-            className={`nav-item ${view === 'dashboard' ? 'active' : ''}`}
-            onClick={() => setView('dashboard')}
-            title="Dashboard"
-          >
-            <LayoutGrid size={20} /> {!sidebarCollapsed && 'Overview'}
-          </button>
-          <button
-            className={`nav-item ${view === 'roster' ? 'active' : ''}`}
-            onClick={() => setView('roster')}
-            title="Roster"
-          >
-            <Calendar size={20} /> {!sidebarCollapsed && 'Roster'}
-          </button>
-          <button
-            className={`nav-item ${view === 'summary' ? 'active' : ''}`}
-            onClick={() => setView('summary')}
-            title="Reports"
-          >
-            <PieChart size={20} /> {!sidebarCollapsed && 'Reports'}
-          </button>
+          {(() => {
+            const dept = departments.find(d => d.id === selectedDepartmentId);
+            const isSheetsMode = dept?.features?.includes('google_sheets_enable');
 
-          <div style={{ height: '1px', background: 'var(--border-color)', margin: '1rem 0' }} />
+            if (isSheetsMode) {
+              return (
+                <>
+                  <button className={`nav-item ${view === 'dashboard' ? 'active' : ''}`} onClick={() => setView('dashboard')} title="Dashboard">
+                    <LayoutGrid size={20} /> {!sidebarCollapsed && 'Dashboard'}
+                  </button>
+                  <button className={`nav-item ${view === 'ps-metrics' ? 'active' : ''}`} onClick={() => setView('ps-metrics')} title="Productivity & Team Metrics">
+                    <PieChart size={20} /> {!sidebarCollapsed && 'Productivity & Team'}
+                  </button>
+                  <button className={`nav-item ${view === 'ps-health' ? 'active' : ''}`} onClick={() => setView('ps-health')} title="Team Health & Engagement">
+                    <Users size={20} /> {!sidebarCollapsed && 'Team Health'}
+                  </button>
+                  <button className={`nav-item ${view === 'ps-quality' ? 'active' : ''}`} onClick={() => setView('ps-quality')} title="Project Quality & Impact">
+                    <ShieldCheck size={20} /> {!sidebarCollapsed && 'Project Quality'}
+                  </button>
+                  <button className={`nav-item ${view === 'ps-ownership' ? 'active' : ''}`} onClick={() => setView('ps-ownership')} title="PS Ownership & Projects">
+                    <Building2 size={20} /> {!sidebarCollapsed && 'PS Ownership'}
+                  </button>
+                </>
+              );
+            }
 
-          <button
-            className={`nav-item ${view === 'requests' ? 'active' : ''}`}
-            onClick={() => setView('requests')}
-            title="Requests"
-          >
-            <FileText size={20} /> {!sidebarCollapsed && 'Requests'}
-          </button>
-          {userRole?.canEdit && (
-            <button
-              className={`nav-item ${view === 'review' ? 'active' : ''}`}
-              onClick={() => setView('review')}
-              title="Review"
-            >
-              <CheckSquare size={20} /> {!sidebarCollapsed && 'Approvals'}
-            </button>
-          )}
-          {isAdmin && selectedDepartmentId && (departments.find(d => d.id === selectedDepartmentId)?.features || []).includes('auto_bucket') && (
-            <button
-              className={`nav-item ${view === 'auto-enablement' ? 'active' : ''}`}
-              onClick={() => setView('auto-enablement')}
-              title="Auto Bucket Mgmt"
-            >
-              <Clock size={20} /> {!sidebarCollapsed && 'Auto Bucket Mgmt'}
-            </button>
-          )}
+            return (
+              <>
+                <button className={`nav-item ${view === 'dashboard' ? 'active' : ''}`} onClick={() => setView('dashboard')} title="Dashboard">
+                  <LayoutGrid size={20} /> {!sidebarCollapsed && 'Overview'}
+                </button>
+                <button className={`nav-item ${view === 'roster' ? 'active' : ''}`} onClick={() => setView('roster')} title="Roster">
+                  <Calendar size={20} /> {!sidebarCollapsed && 'Roster'}
+                </button>
+                <button className={`nav-item ${view === 'summary' ? 'active' : ''}`} onClick={() => setView('summary')} title="Reports">
+                  <PieChart size={20} /> {!sidebarCollapsed && 'Reports'}
+                </button>
+
+                <div style={{ height: '1px', background: 'var(--border-color)', margin: '1rem 0' }} />
+
+                <button className={`nav-item ${view === 'requests' ? 'active' : ''}`} onClick={() => setView('requests')} title="Requests">
+                  <FileText size={20} /> {!sidebarCollapsed && 'Requests'}
+                </button>
+                {userRole?.canEdit && (
+                  <button className={`nav-item ${view === 'review' ? 'active' : ''}`} onClick={() => setView('review')} title="Review">
+                    <CheckSquare size={20} /> {!sidebarCollapsed && 'Approvals'}
+                  </button>
+                )}
+                {isAdmin && selectedDepartmentId && (dept?.features || []).includes('auto_bucket') && (
+                  <button className={`nav-item ${view === 'auto-enablement' ? 'active' : ''}`} onClick={() => setView('auto-enablement')} title="Auto Bucket Mgmt">
+                    <Clock size={20} /> {!sidebarCollapsed && 'Auto Bucket Mgmt'}
+                  </button>
+                )}
+              </>
+            );
+          })()}
         </nav>
 
         <div className="sidebar-footer">
@@ -4336,12 +5458,21 @@ function AuthenticatedApp({ onLogout }) {
 
         {/* Main Content */}
         <main className="main-content" style={{ padding: '0', position: 'relative' }}>
-          {view === 'dashboard' && (
+          {view === 'dashboard' && (() => {
+            const dept = departments.find(d => d.id === selectedDepartmentId);
+            const isSheetsEnabled = dept?.features?.includes('google_sheets_enable');
+            return (
             <Dashboard
+              key={dashboardKey}
               rosterData={allTeamsData}
               currentDate={currentDate}
               onChangeDate={handleDateChange}
               loading={loading}
+              deptName={dept?.name || ''}
+              isSheetsEnabled={isSheetsEnabled}
+              onOpenDevRev={() => setShowDevRevModal(true)}
+              onOpenSlack={() => setShowSlackModal(true)}
+              sheets={dept?.sheets || []}
               headerAction={
                 <div style={{ display: 'flex', gap: '1rem', alignItems: 'center' }}>
                   <TeamSelector teams={teams} selectedTeams={selectedTeams} setSelectedTeams={setSelectedTeams} />
@@ -4354,11 +5485,8 @@ function AuthenticatedApp({ onLogout }) {
                           <button className="btn btn-secondary" onClick={() => setShowSlackModal(true)} style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
                             <MessageSquare size={16} /> Slack Threads
                           </button>
-                          <button className="btn btn-secondary" onClick={() => setShowDevRevModal(true)} style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
-                            <Briefcase size={16} /> DevRev Tickets
-                          </button>
-                          <button className="btn btn-primary" onClick={() => setShowDriveSheetModal(true)}>
-                            <PlusCircle size={16} /> Create Drive Sheet
+                          <button className="btn btn-primary" onClick={() => setShowLinkSheet(true)} style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                            <PlusCircle size={16} /> Add Sheet
                           </button>
                         </>
                       );
@@ -4372,7 +5500,8 @@ function AuthenticatedApp({ onLogout }) {
                 </div>
               }
             />
-          )}
+            );
+          })()}
           {view === 'roster' && (
             <RosterTable
               currentUser={userProfile?.name}
@@ -4433,6 +5562,36 @@ function AuthenticatedApp({ onLogout }) {
               departments={departments}
             />
           )}
+
+          {/* PS-POS Pages — Placeholder views for incremental build */}
+          {view === 'ps-metrics' && (
+            <PSProductivityMetrics />
+          )}
+          {view === 'ps-health' && (
+            <PSTeamHealth />
+          )}
+          {view === 'ps-quality' && (
+            <div className="dashboard-container" style={{ padding: '1.5rem' }}>
+              <h2 style={{ fontSize: '1.25rem', fontWeight: 600, marginBottom: '0.5rem' }}>Project Quality & Impact Metrics</h2>
+              <p style={{ fontSize: '0.85rem', color: 'var(--text-muted)', marginBottom: '1.5rem' }}>Monitor project quality, deliverable impact, and overall project health.</p>
+              <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem' }}>Coming soon — this page will show quality indicators, active project status, and impact metrics.</p>
+            </div>
+          )}
+          {view === 'ps-ownership' && (() => {
+            const dept = departments.find(d => d.id === selectedDepartmentId);
+            return (
+              <div className="dashboard-container" style={{ padding: '1.5rem' }}>
+                <h2 style={{ fontSize: '1.25rem', fontWeight: 600, marginBottom: '0.5rem' }}>PS Ownership & Projects</h2>
+                <p style={{ fontSize: '0.85rem', color: 'var(--text-muted)', marginBottom: '1rem' }}>Track work items, projects, and team threads.</p>
+                <DevRevOverview
+                  deptName={dept?.name || ''}
+                  onLoadMore={() => setShowDevRevModal(true)}
+                  onOpenSlack={() => setShowSlackModal(true)}
+                  sheets={dept?.sheets || []}
+                />
+              </div>
+            );
+          })()}
         </main>
       </div>
 
@@ -4487,8 +5646,21 @@ function AuthenticatedApp({ onLogout }) {
         <DepartmentManager
           onClose={() => setShowDeptManager(false)}
           onDepartmentCreated={() => loadDepartments()}
+          onGlobalLoading={setGlobalLoading}
         />
       )}
+      {showLinkSheet && (() => {
+        const dept = departments.find(d => d.id === selectedDepartmentId);
+        return (
+          <LinkSheetModal
+            deptName={dept?.name || ''}
+            deptId={selectedDepartmentId}
+            onClose={() => setShowLinkSheet(false)}
+            onDone={() => { setShowLinkSheet(false); loadDepartments(); setDashboardKey(k => k + 1); }}
+            onGlobalLoading={setGlobalLoading}
+          />
+        );
+      })()}
 
       {/* Mobile Bottom Navigation */}
       <nav className="mobile-nav">

@@ -146,16 +146,34 @@ export async function importFromGoogleSheet(sheetUrl) {
 // ==================== DEPARTMENT FUNCTIONS ====================
 
 export async function getDepartments() {
-  const rows = await readRange(MASTER_SHEET_ID, 'departments!A:E');
+  const rows = await readRange(MASTER_SHEET_ID, 'departments!A:Z');
   const raw = rowsToObjects(rows);
-  return raw.map(d => ({
-    id: d.department_id,
-    name: d.department_name,
-    slug: (d.department_name || '').toLowerCase().replace(/\s+/g, '-'),
-    spreadsheet_id: d.spreadsheet_id,
-    features: d.features ? d.features.split(',').map(f => f.trim()).filter(Boolean) : [],
-    created_at: d.created_at || new Date().toISOString(),
-  }));
+  return raw.map(d => {
+    const sheets = [];
+    // Support multiple sheet IDs/URLs in spreadsheet_id column (comma-separated)
+    if (d.spreadsheet_id && d.spreadsheet_id.trim()) {
+      d.spreadsheet_id.split(',').forEach((entry, idx) => {
+        const val = entry.trim();
+        if (!val) return;
+        const url = val.includes('docs.google.com') ? val : `https://docs.google.com/spreadsheets/d/${val}/edit`;
+        sheets.push({ url, label: `Sheet ${idx + 1}` });
+      });
+    }
+    // Support new format: sheet_1, sheet_1_label, sheet_2, etc.
+    for (let i = 1; i <= 5; i++) {
+      const url = d[`sheet_${i}`];
+      const label = d[`sheet_${i}_label`] || `Sheet ${i}`;
+      if (url && url.trim()) sheets.push({ url: url.trim(), label: label.trim() });
+    }
+    return {
+      id: d.department_id,
+      name: d.department_name,
+      slug: (d.department_name || '').toLowerCase().replace(/\s+/g, '-'),
+      features: d.features ? d.features.split(',').map(f => f.trim()).filter(Boolean) : [],
+      sheets,
+      created_at: d.created_at || new Date().toISOString(),
+    };
+  });
 }
 
 export async function createDepartment(name, slug) {
@@ -197,17 +215,16 @@ export async function createDriveSheetForDept(departmentId, departmentName, tabC
     }
   }
 
-  const rows = await readRange(MASTER_SHEET_ID, 'departments!A:E');
-  const rowIndex = rows.findIndex((r, i) => i > 0 && r[1] === departmentId);
-  if (rowIndex >= 0) {
-    const row = rows[rowIndex];
-    while (row.length < 5) row.push('');
-    row[2] = spreadsheetId;
-    await writeRange(MASTER_SHEET_ID, `departments!A${rowIndex + 1}:E${rowIndex + 1}`, [row]);
-  }
-
-  deptSheetCache[departmentId] = spreadsheetId;
   return { spreadsheetId, url: `https://docs.google.com/spreadsheets/d/${spreadsheetId}/edit` };
+}
+
+export async function appendSheetIdToDept(deptId, sheetId) {
+  const rows = await readRange(MASTER_SHEET_ID, 'departments!A:D');
+  const rowIndex = rows.findIndex((r, i) => i > 0 && r[1] === deptId);
+  if (rowIndex < 0) throw new Error('Department not found');
+  const existing = (rows[rowIndex][2] || '').trim();
+  const updated = existing ? `${existing},${sheetId}` : sheetId;
+  await writeRange(MASTER_SHEET_ID, `departments!C${rowIndex + 1}`, [[updated]]);
 }
 
 export async function updateDepartment(id, updates) {
