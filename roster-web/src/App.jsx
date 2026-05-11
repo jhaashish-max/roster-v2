@@ -890,16 +890,127 @@ const DEVREV_PRIORITY_STYLES = {
   p4: { bg: '#f9fafb', color: '#6b7280', label: 'P4' },
 };
 
+const DEVREV_PS_ENTERPRISE_PARTS = [
+  'don:core:dvrv-in-1:devo/2sRI6Hepzz:feature/253',
+];
+
 const DevRevTicketsModal = ({ onClose }) => {
+  const [activeTeam, setActiveTeam] = useState('ps-pos'); // 'ps-pos' | 'ps-enterprise'
+
+  // PS-POS state
   const [tickets, setTickets] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [search, setSearch] = useState('');
+  const [posSelectedOwner, setPosSelectedOwner] = useState(null);
   const [collapsedGroups, setCollapsedGroups] = useState({});
+  const [memberEpics, setMemberEpics] = useState([]);
+  const [epicsLoading, setEpicsLoading] = useState(false);
+  const [collapsedEpicGroups, setCollapsedEpicGroups] = useState({});
+
+  // PS-Enterprise state
+  const [entLoading, setEntLoading] = useState(false);
+  const [entError, setEntError] = useState('');
+  const [entGroups, setEntGroups] = useState([]); // [{runnableId, runnableName, issues[]}]
+  const [collapsedEntGroups, setCollapsedEntGroups] = useState({});
+  const [entSearch, setEntSearch] = useState('');
+  const [entSelectedOwner, setEntSelectedOwner] = useState(null);
+
+  const fetchEnterpriseIssues = useCallback(async () => {
+    setEntLoading(true);
+    setEntError('');
+    try {
+      const allByPart = {};
+      await Promise.all(
+        DEVREV_PS_ENTERPRISE_PARTS.map(async (partId) => {
+          let allWorks = [];
+          let cursor = null;
+          do {
+            const params = new URLSearchParams({ type: 'issue', applies_to_part: partId, limit: '100' });
+            if (cursor) params.append('cursor', cursor);
+            const res = await fetch(`https://api.devrev.ai/works.list?${params.toString()}`, {
+              headers: { Authorization: `Bearer ${DEVREV_TOKEN}` },
+            });
+            if (!res.ok) break;
+            const data = await res.json();
+            allWorks = allWorks.concat(data.works || []);
+            cursor = data.next_cursor || null;
+            if (allWorks.length >= 500) break;
+          } while (cursor);
+          if (allWorks.length > 0) {
+            const part = allWorks[0]?.applies_to_part || {};
+            allByPart[partId] = {
+              runnableId: part.display_id || partId,
+              runnableName: part.name || partId,
+              issues: allWorks,
+            };
+          }
+        })
+      );
+      setEntGroups(Object.values(allByPart).sort((a, b) => b.issues.length - a.issues.length));
+    } catch (e) {
+      setEntError(e.message);
+    } finally {
+      setEntLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (activeTeam === 'ps-enterprise' && entGroups.length === 0 && !entLoading) {
+      fetchEnterpriseIssues();
+    }
+  }, [activeTeam, entGroups.length, entLoading, fetchEnterpriseIssues]);
+
+  const fetchMemberEpics = useCallback(async (assignees) => {
+    if (!assignees.length) return;
+    setEpicsLoading(true);
+    try {
+      const results = await Promise.all(
+        assignees.map(async ({ id, name }) => {
+          let allIssues = [];
+          let cursor = null;
+          do {
+            const params = new URLSearchParams({ type: 'issue', limit: '100' });
+            params.append('owned_by', id);
+            if (cursor) params.append('cursor', cursor);
+            const res = await fetch(`https://api.devrev.ai/works.list?${params.toString()}`, {
+              headers: { Authorization: `Bearer ${DEVREV_TOKEN}` },
+            });
+            if (!res.ok) break;
+            const data = await res.json();
+            allIssues = allIssues.concat(data.works || []);
+            cursor = data.next_cursor || null;
+            if (allIssues.length >= 500) break;
+          } while (cursor);
+
+          const epicMap = {};
+          for (const issue of allIssues) {
+            const part = issue.applies_to_part;
+            if (!part) continue;
+            const key = part.display_id || part.id;
+            if (!epicMap[key]) epicMap[key] = { id: part.display_id || '', name: part.name || 'Unknown', count: 0 };
+            epicMap[key].count++;
+          }
+          return {
+            memberId: id,
+            memberName: name,
+            totalIssues: allIssues.length,
+            epics: Object.values(epicMap).sort((a, b) => b.count - a.count),
+          };
+        })
+      );
+      setMemberEpics(results.filter(r => r.epics.length > 0));
+    } catch (_) {
+      // silently fail epics
+    } finally {
+      setEpicsLoading(false);
+    }
+  }, []);
 
   const fetchAllTickets = useCallback(async () => {
     setLoading(true);
     setError('');
+    setMemberEpics([]);
     try {
       let allWorks = [];
       let cursor = null;
@@ -923,23 +1034,55 @@ const DevRevTicketsModal = ({ onClose }) => {
         if (allWorks.length >= 500) break;
       } while (cursor);
       setTickets(allWorks);
+
+      // extract unique real assignees then load their epics
+      const seenIds = new Set();
+      const assignees = [];
+      for (const work of allWorks) {
+        for (const owner of (work.owned_by || [])) {
+          if (owner.type === 'dev_user' && !seenIds.has(owner.id)) {
+            seenIds.add(owner.id);
+            assignees.push({ id: owner.id, name: owner.display_name || owner.full_name || 'Unknown' });
+          }
+        }
+      }
+      fetchMemberEpics(assignees);
     } catch (err) {
       setError(err.message);
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [fetchMemberEpics]);
 
   useEffect(() => { fetchAllTickets(); }, [fetchAllTickets]);
 
+  const posOwners = useMemo(() => {
+    const seen = new Set();
+    const list = [];
+    tickets.forEach(t => {
+      (t.owned_by || []).forEach(o => {
+        if (o.type === 'dev_user' && !seen.has(o.display_name)) {
+          seen.add(o.display_name);
+          list.push(o.display_name);
+        }
+      });
+    });
+    return list.sort();
+  }, [tickets]);
+
   const filtered = useMemo(() => {
-    if (!search.trim()) return tickets;
-    const q = search.toLowerCase();
-    return tickets.filter(t =>
-      t.title?.toLowerCase().includes(q) ||
-      t.display_id?.toLowerCase().includes(q)
-    );
-  }, [tickets, search]);
+    const q = search.trim().toLowerCase();
+    return tickets.filter(t => {
+      const matchesSearch = !q || t.title?.toLowerCase().includes(q) || t.display_id?.toLowerCase().includes(q);
+      const matchesOwner = !posSelectedOwner || (t.owned_by || []).some(o => o.display_name === posSelectedOwner);
+      return matchesSearch && matchesOwner;
+    });
+  }, [tickets, search, posSelectedOwner]);
+
+  const filteredMemberEpics = useMemo(() => {
+    if (!posSelectedOwner) return memberEpics;
+    return memberEpics.filter(m => m.memberName === posSelectedOwner);
+  }, [memberEpics, posSelectedOwner]);
 
   const grouped = useMemo(() => {
     const map = {};
@@ -959,8 +1102,37 @@ const DevRevTicketsModal = ({ onClose }) => {
   const toggleGroup = (key) =>
     setCollapsedGroups(prev => ({ ...prev, [key]: !prev[key] }));
 
+  const toggleEpicGroup = (key) =>
+    setCollapsedEpicGroups(prev => ({ ...prev, [key]: !prev[key] }));
+
+  const toggleEntGroup = (key) =>
+    setCollapsedEntGroups(prev => ({ ...prev, [key]: !prev[key] }));
+
   const ticketUrl = (displayId) =>
     `https://app.devrev.ai/${DEVREV_ORG}/works/${displayId}`;
+
+  const entOwners = useMemo(() => {
+    const seen = new Set();
+    const list = [];
+    entGroups.forEach(g => g.issues.forEach(i => {
+      (i.owned_by || []).forEach(o => {
+        if (!seen.has(o.display_name)) { seen.add(o.display_name); list.push(o.display_name); }
+      });
+    }));
+    return list.sort();
+  }, [entGroups]);
+
+  const filteredEntGroups = useMemo(() => {
+    const q = entSearch.trim().toLowerCase();
+    return entGroups.map(g => ({
+      ...g,
+      issues: g.issues.filter(i => {
+        const matchesSearch = !q || i.title?.toLowerCase().includes(q) || i.display_id?.toLowerCase().includes(q);
+        const matchesOwner = !entSelectedOwner || (i.owned_by || []).some(o => o.display_name === entSelectedOwner);
+        return matchesSearch && matchesOwner;
+      }),
+    })).filter(g => g.issues.length > 0);
+  }, [entGroups, entSearch, entSelectedOwner]);
 
   return (
     <div className="modal-overlay" onClick={onClose}>
@@ -970,23 +1142,18 @@ const DevRevTicketsModal = ({ onClose }) => {
         style={{ maxWidth: '820px', width: '95vw', maxHeight: '90vh', display: 'flex', flexDirection: 'column', padding: 0 }}
       >
         {/* Header */}
-        <div className="modal-header" style={{ padding: '1rem 1.25rem', flexShrink: 0 }}>
+        <div className="modal-header" style={{ padding: '0.75rem 1.25rem', flexShrink: 0 }}>
           <h2 style={{ fontSize: '1.1rem', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
             <Briefcase size={18} />
             DevRev Tickets
-            {!loading && (
-              <span style={{ fontSize: '0.78rem', fontWeight: 400, color: 'var(--text-muted)', marginLeft: '0.25rem' }}>
-                {tickets.length} issues · grouped by assignee
-              </span>
-            )}
           </h2>
           <div style={{ display: 'flex', gap: '0.4rem', alignItems: 'center' }}>
             <button
-              onClick={fetchAllTickets}
+              onClick={activeTeam === 'ps-pos' ? fetchAllTickets : fetchEnterpriseIssues}
               title="Refresh"
               style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-muted)', display: 'flex', alignItems: 'center' }}
             >
-              <RefreshCw size={15} className={loading ? 'spin' : ''} />
+              <RefreshCw size={15} className={(loading || entLoading) ? 'spin' : ''} />
             </button>
             <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-muted)', display: 'flex', alignItems: 'center' }}>
               <X size={20} />
@@ -994,107 +1161,360 @@ const DevRevTicketsModal = ({ onClose }) => {
           </div>
         </div>
 
-        {/* Error */}
-        {error && (
-          <div style={{ margin: '0 1.25rem 0.5rem', padding: '0.5rem 0.75rem', background: '#fef2f2', color: '#dc2626', borderRadius: '6px', fontSize: '0.8rem', flexShrink: 0 }}>
+        {/* Team Tabs */}
+        <div style={{ display: 'flex', gap: '0.4rem', padding: '0 1.25rem 0.75rem', flexShrink: 0, borderBottom: '1px solid var(--border-color)' }}>
+          {[
+            { id: 'ps-pos', label: 'PS-POS' },
+            { id: 'ps-enterprise', label: 'PS-Enterprise' },
+          ].map(tab => (
+            <button
+              key={tab.id}
+              onClick={() => setActiveTeam(tab.id)}
+              style={{
+                padding: '0.3rem 0.85rem',
+                borderRadius: '20px',
+                border: activeTeam === tab.id ? 'none' : '1px solid var(--border-color)',
+                background: activeTeam === tab.id ? 'var(--accent-primary)' : 'transparent',
+                color: activeTeam === tab.id ? '#fff' : 'var(--text-secondary)',
+                fontSize: '0.8rem',
+                fontWeight: 600,
+                cursor: 'pointer',
+              }}
+            >
+              {tab.label}
+            </button>
+          ))}
+        </div>
+
+        {/* Errors */}
+        {activeTeam === 'ps-pos' && error && (
+          <div style={{ margin: '0.5rem 1.25rem 0', padding: '0.5rem 0.75rem', background: '#fef2f2', color: '#dc2626', borderRadius: '6px', fontSize: '0.8rem', flexShrink: 0 }}>
             <AlertCircle size={14} style={{ verticalAlign: 'middle', marginRight: '4px' }} /> {error}
           </div>
         )}
-
-        {/* Search */}
-        <div style={{ padding: '0 1.25rem 0.75rem', flexShrink: 0 }}>
-          <input
-            className="form-input"
-            value={search}
-            onChange={e => setSearch(e.target.value)}
-            placeholder="Search by title or ID…"
-            style={{ width: '100%', fontSize: '0.85rem' }}
-          />
-        </div>
+        {activeTeam === 'ps-enterprise' && entError && (
+          <div style={{ margin: '0.5rem 1.25rem 0', padding: '0.5rem 0.75rem', background: '#fef2f2', color: '#dc2626', borderRadius: '6px', fontSize: '0.8rem', flexShrink: 0 }}>
+            <AlertCircle size={14} style={{ verticalAlign: 'middle', marginRight: '4px' }} /> {entError}
+          </div>
+        )}
 
         {/* Body */}
         <div style={{ overflow: 'auto', flex: 1, padding: '0 1.25rem 1.25rem' }}>
-          {loading ? (
+          {/* ── PS-ENTERPRISE TAB ── */}
+          {activeTeam === 'ps-enterprise' && (
+            entLoading ? (
+              <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', padding: '3rem', color: 'var(--text-muted)' }}>
+                <Loader2 size={24} className="spin" />
+              </div>
+            ) : (
+              <>
+                <div style={{ paddingTop: '0.75rem', marginBottom: '0.5rem' }}>
+                  <input
+                    className="form-input"
+                    value={entSearch}
+                    onChange={e => setEntSearch(e.target.value)}
+                    placeholder="Search by title or ID…"
+                    style={{ width: '100%', fontSize: '0.85rem' }}
+                  />
+                </div>
+                {entOwners.length > 0 && (
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.35rem', marginBottom: '0.75rem' }}>
+                    <button
+                      onClick={() => setEntSelectedOwner(null)}
+                      style={{
+                        padding: '0.2rem 0.6rem', borderRadius: '12px', fontSize: '0.72rem', fontWeight: 600, cursor: 'pointer',
+                        border: entSelectedOwner === null ? 'none' : '1px solid var(--border-color)',
+                        background: entSelectedOwner === null ? 'var(--accent-primary)' : 'transparent',
+                        color: entSelectedOwner === null ? '#fff' : 'var(--text-secondary)',
+                      }}
+                    >
+                      All
+                    </button>
+                    {entOwners.map(name => (
+                      <button
+                        key={name}
+                        onClick={() => setEntSelectedOwner(entSelectedOwner === name ? null : name)}
+                        style={{
+                          padding: '0.2rem 0.6rem', borderRadius: '12px', fontSize: '0.72rem', fontWeight: 500, cursor: 'pointer',
+                          border: entSelectedOwner === name ? 'none' : '1px solid var(--border-color)',
+                          background: entSelectedOwner === name ? 'var(--accent-primary)' : 'transparent',
+                          color: entSelectedOwner === name ? '#fff' : 'var(--text-secondary)',
+                        }}
+                      >
+                        {name}
+                      </button>
+                    ))}
+                  </div>
+                )}
+                {filteredEntGroups.length === 0 ? (
+                  <div style={{ textAlign: 'center', padding: '3rem', color: 'var(--text-muted)', fontSize: '0.9rem' }}>No issues found</div>
+                ) : (
+                  filteredEntGroups.map(({ runnableId, runnableName, issues }) => (
+                    <div key={runnableId} style={{ marginBottom: '0.75rem' }}>
+                      <button
+                        onClick={() => toggleEntGroup(runnableId)}
+                        style={{
+                          display: 'flex', alignItems: 'center', gap: '0.5rem',
+                          width: '100%', padding: '0.5rem 0.6rem',
+                          background: 'var(--bg-hover)', border: 'none', borderRadius: '6px',
+                          cursor: 'pointer', textAlign: 'left',
+                          color: 'var(--text-primary)', fontWeight: 600, fontSize: '0.88rem',
+                        }}
+                      >
+                        {collapsedEntGroups[runnableId] ? <ChevronRight size={15} /> : <ChevronDown size={15} />}
+                        <span style={{ flex: 1 }}>{runnableName}</span>
+                        <span style={{ fontSize: '0.7rem', fontFamily: 'monospace', color: 'var(--text-muted)', marginRight: '0.4rem' }}>{runnableId}</span>
+                        <span style={{ fontSize: '0.72rem', fontWeight: 600, color: 'var(--text-muted)', background: 'var(--bg-secondary)', padding: '0.1rem 0.45rem', borderRadius: '10px' }}>
+                          {issues.length}
+                        </span>
+                      </button>
+                      {!collapsedEntGroups[runnableId] && (
+                        <div style={{ borderLeft: '2px solid var(--border-color)', marginLeft: '0.6rem' }}>
+                          {issues.map(issue => {
+                            const stageKey = (issue.stage?.name || '').toLowerCase().replace(/ /g, '_');
+                            const priority = (issue.priority || 'p4').toLowerCase();
+                            const statusStyle = DEVREV_STATUS_STYLES[stageKey] || DEVREV_STATUS_STYLES.open;
+                            const priorityStyle = DEVREV_PRIORITY_STYLES[priority] || DEVREV_PRIORITY_STYLES.p4;
+                            const owners = (issue.owned_by || []).map(o => o.display_name).join(', ') || 'Unassigned';
+                            return (
+                              <div key={issue.id} style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', padding: '0.55rem 0.75rem', borderBottom: '1px solid var(--border-color)' }}>
+                                <a
+                                  href={ticketUrl(issue.display_id)}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  style={{ color: 'var(--text-muted)', fontSize: '0.72rem', fontFamily: 'monospace', flexShrink: 0, textDecoration: 'none', whiteSpace: 'nowrap' }}
+                                >
+                                  {issue.display_id}
+                                </a>
+                                <a
+                                  href={ticketUrl(issue.display_id)}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  style={{ flex: 1, color: 'var(--text-primary)', fontSize: '0.83rem', textDecoration: 'none', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+                                  title={issue.title}
+                                >
+                                  {issue.title}
+                                </a>
+                                <div style={{ display: 'flex', gap: '0.3rem', flexShrink: 0, alignItems: 'center' }}>
+                                  <span style={{ fontSize: '0.68rem', color: 'var(--text-muted)', whiteSpace: 'nowrap' }}>{owners}</span>
+                                  <span style={{ padding: '0.12rem 0.4rem', borderRadius: '4px', fontSize: '0.68rem', fontWeight: 700, background: priorityStyle.bg, color: priorityStyle.color }}>
+                                    {priorityStyle.label}
+                                  </span>
+                                  <span style={{ padding: '0.12rem 0.4rem', borderRadius: '4px', fontSize: '0.68rem', fontWeight: 500, background: statusStyle.bg, color: statusStyle.color }}>
+                                    {statusStyle.label}
+                                  </span>
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+                  ))
+                )}
+              </>
+            )
+          )}
+
+          {/* ── PS-POS TAB ── */}
+          {activeTeam === 'ps-pos' && loading ? (
             <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', padding: '3rem', color: 'var(--text-muted)' }}>
               <Loader2 size={24} className="spin" />
             </div>
-          ) : grouped.length === 0 ? (
-            <div style={{ textAlign: 'center', padding: '3rem', color: 'var(--text-muted)', fontSize: '0.9rem' }}>
-              No tickets found
-            </div>
-          ) : (
-            grouped.map(([key, group]) => (
-              <div key={key} style={{ marginBottom: '0.75rem' }}>
-                <button
-                  onClick={() => toggleGroup(key)}
-                  style={{
-                    display: 'flex', alignItems: 'center', gap: '0.5rem',
-                    width: '100%', padding: '0.5rem 0.6rem',
-                    background: 'var(--bg-hover)', border: 'none', borderRadius: '6px',
-                    cursor: 'pointer', textAlign: 'left',
-                    color: 'var(--text-primary)', fontWeight: 600, fontSize: '0.88rem',
-                  }}
-                >
-                  {collapsedGroups[key] ? <ChevronRight size={15} /> : <ChevronDown size={15} />}
-                  <span style={{ flex: 1 }}>{group.name}</span>
-                  <span style={{
-                    fontSize: '0.72rem', fontWeight: 600, color: 'var(--text-muted)',
-                    background: 'var(--bg-secondary)', padding: '0.1rem 0.45rem', borderRadius: '10px',
-                  }}>
-                    {group.items.length}
-                  </span>
-                </button>
+          ) : activeTeam === 'ps-pos' && (
+            <>
+              {/* ── NAME FILTER ── */}
+              <div style={{ paddingTop: '0.75rem', marginBottom: '0.5rem' }}>
+                <input
+                  className="form-input"
+                  value={search}
+                  onChange={e => setSearch(e.target.value)}
+                  placeholder="Search by title or ID…"
+                  style={{ width: '100%', fontSize: '0.85rem' }}
+                />
+              </div>
+              {posOwners.length > 0 && (
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.35rem', marginBottom: '1rem' }}>
+                  <button
+                    onClick={() => setPosSelectedOwner(null)}
+                    style={{
+                      padding: '0.2rem 0.6rem', borderRadius: '12px', fontSize: '0.72rem', fontWeight: 600, cursor: 'pointer',
+                      border: posSelectedOwner === null ? 'none' : '1px solid var(--border-color)',
+                      background: posSelectedOwner === null ? 'var(--accent-primary)' : 'transparent',
+                      color: posSelectedOwner === null ? '#fff' : 'var(--text-secondary)',
+                    }}
+                  >
+                    All
+                  </button>
+                  {posOwners.map(name => (
+                    <button
+                      key={name}
+                      onClick={() => setPosSelectedOwner(posSelectedOwner === name ? null : name)}
+                      style={{
+                        padding: '0.2rem 0.6rem', borderRadius: '12px', fontSize: '0.72rem', fontWeight: 500, cursor: 'pointer',
+                        border: posSelectedOwner === name ? 'none' : '1px solid var(--border-color)',
+                        background: posSelectedOwner === name ? 'var(--accent-primary)' : 'transparent',
+                        color: posSelectedOwner === name ? '#fff' : 'var(--text-secondary)',
+                      }}
+                    >
+                      {name}
+                    </button>
+                  ))}
+                </div>
+              )}
 
-                {!collapsedGroups[key] && (
-                  <div style={{ borderLeft: '2px solid var(--border-color)', marginLeft: '0.6rem' }}>
-                    {group.items.map(ticket => {
-                      const stageKey = (ticket.stage?.name || '')
-                        .toLowerCase().replace(/ /g, '_');
-                      const priority = (ticket.priority || 'p4').toLowerCase();
-                      const statusStyle = DEVREV_STATUS_STYLES[stageKey] || DEVREV_STATUS_STYLES.open;
-                      const priorityStyle = DEVREV_PRIORITY_STYLES[priority] || DEVREV_PRIORITY_STYLES.p4;
+              {/* ── MEMBER EPICS SECTION ── */}
+              <div style={{ marginBottom: '1.5rem' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.6rem', paddingBottom: '0.4rem', borderBottom: '2px solid var(--border-color)' }}>
+                  <h3 style={{ margin: 0, fontSize: '0.82rem', fontWeight: 700, color: 'var(--text-primary)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+                    Member Epics
+                  </h3>
+                  {epicsLoading
+                    ? <Loader2 size={12} className="spin" style={{ color: 'var(--text-muted)' }} />
+                    : <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>{filteredMemberEpics.length} members</span>
+                  }
+                </div>
 
-                      return (
-                        <div
-                          key={ticket.id}
-                          style={{
-                            display: 'flex', alignItems: 'center', gap: '0.75rem',
-                            padding: '0.55rem 0.75rem',
-                            borderBottom: '1px solid var(--border-color)',
-                          }}
-                        >
-                          <a
-                            href={ticketUrl(ticket.display_id)}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            style={{ color: 'var(--text-muted)', fontSize: '0.72rem', fontFamily: 'monospace', flexShrink: 0, textDecoration: 'none', whiteSpace: 'nowrap' }}
-                          >
-                            {ticket.display_id}
-                          </a>
-                          <a
-                            href={ticketUrl(ticket.display_id)}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            style={{ flex: 1, color: 'var(--text-primary)', fontSize: '0.83rem', textDecoration: 'none', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
-                            title={ticket.title}
-                          >
-                            {ticket.title}
-                          </a>
-                          <div style={{ display: 'flex', gap: '0.3rem', flexShrink: 0 }}>
-                            <span style={{ padding: '0.12rem 0.4rem', borderRadius: '4px', fontSize: '0.68rem', fontWeight: 700, background: priorityStyle.bg, color: priorityStyle.color }}>
-                              {priorityStyle.label}
-                            </span>
-                            <span style={{ padding: '0.12rem 0.4rem', borderRadius: '4px', fontSize: '0.68rem', fontWeight: 500, background: statusStyle.bg, color: statusStyle.color }}>
-                              {statusStyle.label}
-                            </span>
-                          </div>
-                        </div>
-                      );
-                    })}
+                {epicsLoading && memberEpics.length === 0 ? (
+                  <div style={{ padding: '1rem', color: 'var(--text-muted)', fontSize: '0.82rem', textAlign: 'center' }}>
+                    <Loader2 size={14} className="spin" style={{ verticalAlign: 'middle', marginRight: '6px' }} />
+                    Loading member epics…
                   </div>
+                ) : filteredMemberEpics.length === 0 ? (
+                  <div style={{ padding: '0.5rem', color: 'var(--text-muted)', fontSize: '0.8rem' }}>No epic data found.</div>
+                ) : (
+                  filteredMemberEpics.map(({ memberId, memberName, totalIssues, epics }) => (
+                    <div key={memberId} style={{ marginBottom: '0.4rem' }}>
+                      <button
+                        onClick={() => toggleEpicGroup(memberId)}
+                        style={{
+                          display: 'flex', alignItems: 'center', gap: '0.5rem',
+                          width: '100%', padding: '0.45rem 0.6rem',
+                          background: 'var(--bg-hover)', border: 'none', borderRadius: '6px',
+                          cursor: 'pointer', textAlign: 'left',
+                          color: 'var(--text-primary)', fontWeight: 600, fontSize: '0.85rem',
+                        }}
+                      >
+                        {collapsedEpicGroups[memberId] ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
+                        <span style={{ flex: 1 }}>{memberName}</span>
+                        <span style={{ fontSize: '0.7rem', fontWeight: 500, color: 'var(--text-muted)', background: 'var(--bg-secondary)', padding: '0.1rem 0.4rem', borderRadius: '10px' }}>
+                          {totalIssues} issues · {epics.length} epics
+                        </span>
+                      </button>
+                      {!collapsedEpicGroups[memberId] && (
+                        <div style={{ borderLeft: '2px solid var(--border-color)', marginLeft: '0.6rem', marginTop: '0.2rem' }}>
+                          {epics.map(epic => (
+                            <div key={epic.id} style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', padding: '0.3rem 0.6rem', borderBottom: '1px solid var(--border-color)' }}>
+                              <span style={{ color: 'var(--text-muted)', fontSize: '0.7rem', fontFamily: 'monospace', flexShrink: 0 }}>
+                                {epic.id}
+                              </span>
+                              <span style={{ flex: 1, fontSize: '0.82rem', color: 'var(--text-primary)' }}>{epic.name}</span>
+                              <span style={{ fontSize: '0.68rem', fontWeight: 600, background: '#dbeafe', color: '#1d4ed8', padding: '0.1rem 0.4rem', borderRadius: '10px', flexShrink: 0 }}>
+                                {epic.count}
+                              </span>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  ))
                 )}
               </div>
-            ))
+
+              {/* ── CURRENT SPRINT SECTION ── */}
+              <div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.6rem', paddingBottom: '0.4rem', borderBottom: '2px solid var(--border-color)' }}>
+                  <h3 style={{ margin: 0, fontSize: '0.82rem', fontWeight: 700, color: 'var(--text-primary)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+                    Current Sprint
+                  </h3>
+                  <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>{filtered.length} issues</span>
+                </div>
+                {grouped.length === 0 ? (
+                  <div style={{ textAlign: 'center', padding: '2rem', color: 'var(--text-muted)', fontSize: '0.9rem' }}>
+                    No tickets found
+                  </div>
+                ) : (
+                  grouped.map(([key, group]) => (
+                    <div key={key} style={{ marginBottom: '0.75rem' }}>
+                      <button
+                        onClick={() => toggleGroup(key)}
+                        style={{
+                          display: 'flex', alignItems: 'center', gap: '0.5rem',
+                          width: '100%', padding: '0.5rem 0.6rem',
+                          background: 'var(--bg-hover)', border: 'none', borderRadius: '6px',
+                          cursor: 'pointer', textAlign: 'left',
+                          color: 'var(--text-primary)', fontWeight: 600, fontSize: '0.88rem',
+                        }}
+                      >
+                        {collapsedGroups[key] ? <ChevronRight size={15} /> : <ChevronDown size={15} />}
+                        <span style={{ flex: 1 }}>{group.name}</span>
+                        <span style={{
+                          fontSize: '0.72rem', fontWeight: 600, color: 'var(--text-muted)',
+                          background: 'var(--bg-secondary)', padding: '0.1rem 0.45rem', borderRadius: '10px',
+                        }}>
+                          {group.items.length}
+                        </span>
+                      </button>
+
+                      {!collapsedGroups[key] && (
+                        <div style={{ borderLeft: '2px solid var(--border-color)', marginLeft: '0.6rem' }}>
+                          {group.items.map(ticket => {
+                            const stageKey = (ticket.stage?.name || '')
+                              .toLowerCase().replace(/ /g, '_');
+                            const priority = (ticket.priority || 'p4').toLowerCase();
+                            const statusStyle = DEVREV_STATUS_STYLES[stageKey] || DEVREV_STATUS_STYLES.open;
+                            const priorityStyle = DEVREV_PRIORITY_STYLES[priority] || DEVREV_PRIORITY_STYLES.p4;
+                            const epicName = ticket.applies_to_part?.name;
+
+                            return (
+                              <div
+                                key={ticket.id}
+                                style={{
+                                  display: 'flex', alignItems: 'center', gap: '0.75rem',
+                                  padding: '0.55rem 0.75rem',
+                                  borderBottom: '1px solid var(--border-color)',
+                                }}
+                              >
+                                <a
+                                  href={ticketUrl(ticket.display_id)}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  style={{ color: 'var(--text-muted)', fontSize: '0.72rem', fontFamily: 'monospace', flexShrink: 0, textDecoration: 'none', whiteSpace: 'nowrap' }}
+                                >
+                                  {ticket.display_id}
+                                </a>
+                                <a
+                                  href={ticketUrl(ticket.display_id)}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  style={{ flex: 1, color: 'var(--text-primary)', fontSize: '0.83rem', textDecoration: 'none', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+                                  title={ticket.title}
+                                >
+                                  {ticket.title}
+                                </a>
+                                <div style={{ display: 'flex', gap: '0.3rem', flexShrink: 0, alignItems: 'center' }}>
+                                  {epicName && (
+                                    <span style={{ padding: '0.12rem 0.4rem', borderRadius: '4px', fontSize: '0.65rem', fontWeight: 500, background: '#f3e8ff', color: '#7c3aed', maxWidth: '90px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={epicName}>
+                                      {epicName}
+                                    </span>
+                                  )}
+                                  <span style={{ padding: '0.12rem 0.4rem', borderRadius: '4px', fontSize: '0.68rem', fontWeight: 700, background: priorityStyle.bg, color: priorityStyle.color }}>
+                                    {priorityStyle.label}
+                                  </span>
+                                  <span style={{ padding: '0.12rem 0.4rem', borderRadius: '4px', fontSize: '0.68rem', fontWeight: 500, background: statusStyle.bg, color: statusStyle.color }}>
+                                    {statusStyle.label}
+                                  </span>
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+                  ))
+                )}
+              </div>
+            </>
           )}
         </div>
       </div>
