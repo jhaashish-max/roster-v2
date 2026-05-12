@@ -851,9 +851,13 @@ const DevRevOverview = ({ deptName, onLoadMore, onOpenSlack, sheets = [] }) => {
 // ─── PS PROJECT QUALITY & IMPACT ──────────────────────────────────
 const SHEETS_CACHE_KEY = 'ps_sheets_cache';
 
+const PS_POS_FEATURE_ID = 'don:core:dvrv-in-1:devo/2sRI6Hepzz:feature/250';
+
 const PSProjectQuality = ({ sheets = [] }) => {
   const [allTabs, setAllTabs] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [enhancements, setEnhancements] = useState([]);
+  const [enhLoading, setEnhLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [lastCacheTime, setLastCacheTime] = useState(null);
 
@@ -894,6 +898,31 @@ const PSProjectQuality = ({ sheets = [] }) => {
 
   // Background refresh on mount
   useEffect(() => { fetchSheetData(); }, [fetchSheetData]);
+
+  // Fetch DevRev enhancements for Quality Indicators
+  useEffect(() => {
+    if (!DEVREV_TOKEN) { setEnhLoading(false); return; }
+    (async () => {
+      try {
+        let allParts = [], cursor = null;
+        do {
+          const body = { type: ['enhancement'], custom_fields: { tnt__ancestral_feature: [PS_POS_FEATURE_ID] }, limit: 100 };
+          if (cursor) body.cursor = cursor;
+          const res = await fetch('https://api.devrev.ai/parts.list', {
+            method: 'POST', headers: { 'Authorization': `Bearer ${DEVREV_TOKEN}`, 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+          });
+          if (!res.ok) break;
+          const data = await res.json();
+          allParts = allParts.concat(data.parts || []);
+          cursor = data.next_cursor || null;
+          if (allParts.length >= 500) break;
+        } while (cursor);
+        setEnhancements(allParts);
+      } catch { }
+      finally { setEnhLoading(false); }
+    })();
+  }, []);
 
   // Build revenue map from "Revenue" tab(s)
   const revenueMap = useMemo(() => {
@@ -1015,30 +1044,41 @@ const PSProjectQuality = ({ sheets = [] }) => {
 
           {/* Quality Indicators + Project Progress */}
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.75rem', marginBottom: '1.25rem' }}>
-            {/* Quality Indicators — status breakdown as progress bars */}
+            {/* Quality Indicators — from DevRev enhancements */}
             <div style={{ background: 'var(--bg-card)', borderRadius: '12px', border: '1px solid var(--border-color)', padding: '1rem' }}>
               <h3 style={{ fontSize: '0.85rem', fontWeight: 600, marginBottom: '1rem', color: 'var(--text-primary)' }}>Quality Indicators</h3>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '0.6rem' }}>
-                {(() => {
-                  const statusMap = {};
-                  projects.forEach(p => { const s = p.status || 'Unknown'; statusMap[s] = (statusMap[s] || 0) + 1; });
-                  return Object.entries(statusMap).sort(([,a],[,b]) => b - a).map(([status, count], i) => {
-                    const pct = Math.round((count / projects.length) * 100);
-                    const sc = statusColor(status);
-                    return (
-                      <div key={status}>
-                        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '0.2rem' }}>
-                          <span style={{ fontSize: '0.72rem', color: 'var(--text-primary)' }}>{status}</span>
-                          <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>{pct}%</span>
+              {enhLoading ? (
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', color: 'var(--text-muted)', fontSize: '0.8rem' }}>
+                  <Loader2 size={14} className="spin" /> Loading enhancements...
+                </div>
+              ) : enhancements.length === 0 ? (
+                <p style={{ fontSize: '0.78rem', color: 'var(--text-muted)' }}>No PS-POS enhancements found.</p>
+              ) : (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '0.6rem' }}>
+                  {(() => {
+                    const statusMap = {};
+                    enhancements.forEach(e => {
+                      const s = (e.custom_fields?.tnt__status || '').replace(/[⚫🟢🟡🔴⚪🟠🔵]/g, '').trim() || 'Unknown';
+                      statusMap[s] = (statusMap[s] || 0) + 1;
+                    });
+                    return Object.entries(statusMap).sort(([,a],[,b]) => b - a).map(([status, count], i) => {
+                      const pct = Math.round((count / enhancements.length) * 100);
+                      return (
+                        <div key={status}>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '0.2rem' }}>
+                            <span style={{ fontSize: '0.72rem', color: 'var(--text-primary)' }}>{status}</span>
+                            <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>{pct}%</span>
+                          </div>
+                          <div style={{ height: 6, borderRadius: 3, background: 'var(--bg-hover)', overflow: 'hidden' }}>
+                            <div style={{ height: '100%', borderRadius: 3, width: `${pct}%`, background: ['#059669', '#2563eb', '#d97706', '#7c3aed', '#ef4444'][i % 5] }} />
+                          </div>
                         </div>
-                        <div style={{ height: 6, borderRadius: 3, background: 'var(--bg-hover)', overflow: 'hidden' }}>
-                          <div style={{ height: '100%', borderRadius: 3, width: `${pct}%`, background: ['#059669', '#2563eb', '#d97706', '#7c3aed', '#ef4444'][i % 5] }} />
-                        </div>
-                      </div>
-                    );
-                  });
-                })()}
-              </div>
+                      );
+                    });
+                  })()}
+                  <p style={{ fontSize: '0.65rem', color: 'var(--text-muted)', marginTop: '0.3rem' }}>{enhancements.length} enhancements from DevRev (PS-POS)</p>
+                </div>
+              )}
             </div>
 
             {/* Revenue by Source */}
