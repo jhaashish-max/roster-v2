@@ -509,3 +509,9 @@ export async function saveShiftLegends(legends, departmentId) {
     if (!res.ok) throw new Error(data.error);
     return data;
 }
+
+export async function getSEBandwidth(departmentId) {
+    // SE Bandwidth always reads from Google Sheets regardless of the data layer mode
+    const s = await getSheetsApi();
+    return s.getSEBandwidth(departmentId);
+}

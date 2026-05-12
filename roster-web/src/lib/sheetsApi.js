@@ -570,6 +570,14 @@ export async function deleteShiftConfig(id, departmentId) {
   return { success: true };
 }
 
+// ==================== SE BANDWIDTH FUNCTIONS ====================
+
+export async function getSEBandwidth(departmentId) {
+  const spreadsheetId = await getDeptSpreadsheetId(departmentId);
+  const rows = await readRange(spreadsheetId, 'se_bandwidth!A:K');
+  return rowsToObjects(rows);
+}
+
 // ==================== SHIFT LEGEND FUNCTIONS ====================
 
 export async function getShiftLegends(departmentId) {

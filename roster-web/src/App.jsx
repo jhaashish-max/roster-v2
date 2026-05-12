@@ -38,7 +38,10 @@ import {
   HelpCircle,
   Phone,
   Building2,
-  Palette
+  Palette,
+  BarChart3,
+  LayoutDashboard,
+  Headphones
 } from 'lucide-react';
 import CellEditor from './components/CellEditor';
 import Summary from './components/Summary';
@@ -48,6 +51,8 @@ import Logo from './components/Logo';
 import ShiftConfigModal from './components/ShiftConfigModal';
 import AgentAvailability from './components/AgentAvailability';
 import MiscSettings from './components/MiscSettings';
+import SolutionsDashboard from './components/SolutionsDashboard';
+import SEBandwidth from './components/SEBandwidth';
 import { format, startOfMonth, endOfMonth, eachDayOfInterval, addMonths, subMonths, isWeekend, isAfter, isBefore, parseISO, startOfDay, isSameDay } from 'date-fns';
 import { fetchRoster, fetchAllTeamsRoster, checkRosterExists, deleteRoster, updateRosterEntry, getTeams, createTeam, updateTeam, deleteTeam, isLoggedIn, getUserEmail, logout as authLogout, handleAuthCallback, checkAdmin, listAdmins, addAdmin, removeAdmin, whoAmI, createLeaveRequest, getMyRequests, getPendingRequests, reviewRequest, getTeamEmails, updateTeamEmails, getShiftConfigs, saveShiftConfigs, deleteShiftConfig, getDepartments, createDepartment, getDepartmentMembers, getShiftLegends, saveShiftLegends, updateDepartment, setDataLayerMode, createDriveSheetForDept, importFromGoogleSheet } from './lib/api';
 import { isGoogleLoggedIn, googleLogout, getGoogleUserEmail } from './lib/googleAuth';
@@ -2854,6 +2859,9 @@ function AuthenticatedApp({ onLogout }) {
     try { return localStorage.getItem('roster_selected_dept') || ''; } catch { return ''; }
   });
 
+  // Solutions department flag
+  const isSolutionsDept = departments.find(d => d.id === selectedDepartmentId)?.name?.toLowerCase() === 'solutions';
+
   // Command Palette State
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
 
@@ -2964,6 +2972,14 @@ function AuthenticatedApp({ onLogout }) {
     setDataLayerMode(useSheets);
   }, [selectedDepartmentId, departments]);
 
+  // Auto-switch to Solutions view when Solutions department is selected
+  useEffect(() => {
+    const solutionsViews = ['solutions', 'se-bandwidth'];
+    if (isSolutionsDept && !solutionsViews.includes(view)) {
+      setView('solutions');
+    }
+  }, [isSolutionsDept, view]);
+
   const loadTeams = async () => {
     const data = await getTeams(selectedDepartmentId || undefined);
     setTeams(data);
@@ -2980,6 +2996,13 @@ function AuthenticatedApp({ onLogout }) {
 
   // Fetch roster data when month or selected teams change
   const loadRoster = useCallback(async () => {
+    // Solutions department does not use the standard roster data model
+    // Also skip until departments have loaded (prevents false "Not authenticated" toast on initial render)
+    if (isSolutionsDept || !selectedDepartmentId || departments.length === 0) {
+      setLoading(false);
+      return;
+    }
+
     setLoading(true);
     const year = currentDate.getFullYear();
     const month = currentDate.getMonth() + 1;
@@ -3008,7 +3031,7 @@ function AuthenticatedApp({ onLogout }) {
     } finally {
       setLoading(false);
     }
-  }, [currentDate, selectedTeams, selectedDepartmentId]);
+  }, [currentDate, selectedTeams, selectedDepartmentId, isSolutionsDept, departments]);
 
   useEffect(() => {
     loadRoster();
@@ -3177,54 +3200,77 @@ function AuthenticatedApp({ onLogout }) {
         </button>
 
         <nav className="sidebar-nav" style={{ marginTop: '1rem' }}>
-          <button
-            className={`nav-item ${view === 'dashboard' ? 'active' : ''}`}
-            onClick={() => setView('dashboard')}
-            title="Dashboard"
-          >
-            <LayoutGrid size={20} /> {!sidebarCollapsed && 'Overview'}
-          </button>
-          <button
-            className={`nav-item ${view === 'roster' ? 'active' : ''}`}
-            onClick={() => setView('roster')}
-            title="Roster"
-          >
-            <Calendar size={20} /> {!sidebarCollapsed && 'Roster'}
-          </button>
-          <button
-            className={`nav-item ${view === 'summary' ? 'active' : ''}`}
-            onClick={() => setView('summary')}
-            title="Reports"
-          >
-            <PieChart size={20} /> {!sidebarCollapsed && 'Reports'}
-          </button>
+          {isSolutionsDept ? (
+            /* ── Solutions-only nav ── */
+            <>
+              <button
+                className={`nav-item ${view === 'se-bandwidth' ? 'active' : ''}`}
+                onClick={() => setView('se-bandwidth')}
+                title="SE Bandwidth"
+              >
+                <Headphones size={20} /> {!sidebarCollapsed && 'SE Bandwidth'}
+              </button>
+              <button
+                className={`nav-item ${view === 'solutions' ? 'active' : ''}`}
+                onClick={() => setView('solutions')}
+                title="Score Card"
+              >
+                <LayoutDashboard size={20} /> {!sidebarCollapsed && 'Score Card'}
+              </button>
+              <div style={{ height: '1px', background: 'var(--border-color)', margin: '1rem 0' }} />
+            </>
+          ) : (
+            /* ── Standard departments nav ── */
+            <>
+              <button
+                className={`nav-item ${view === 'dashboard' ? 'active' : ''}`}
+                onClick={() => setView('dashboard')}
+                title="Dashboard"
+              >
+                <LayoutGrid size={20} /> {!sidebarCollapsed && 'Overview'}
+              </button>
+              <button
+                className={`nav-item ${view === 'roster' ? 'active' : ''}`}
+                onClick={() => setView('roster')}
+                title="Roster"
+              >
+                <Calendar size={20} /> {!sidebarCollapsed && 'Roster'}
+              </button>
+              <button
+                className={`nav-item ${view === 'summary' ? 'active' : ''}`}
+                onClick={() => setView('summary')}
+                title="Reports"
+              >
+                <PieChart size={20} /> {!sidebarCollapsed && 'Reports'}
+              </button>
+              <div style={{ height: '1px', background: 'var(--border-color)', margin: '1rem 0' }} />
 
-          <div style={{ height: '1px', background: 'var(--border-color)', margin: '1rem 0' }} />
-
-          <button
-            className={`nav-item ${view === 'requests' ? 'active' : ''}`}
-            onClick={() => setView('requests')}
-            title="Requests"
-          >
-            <FileText size={20} /> {!sidebarCollapsed && 'Requests'}
-          </button>
-          {userRole?.canEdit && (
-            <button
-              className={`nav-item ${view === 'review' ? 'active' : ''}`}
-              onClick={() => setView('review')}
-              title="Review"
-            >
-              <CheckSquare size={20} /> {!sidebarCollapsed && 'Approvals'}
-            </button>
-          )}
-          {isAdmin && selectedDepartmentId && (departments.find(d => d.id === selectedDepartmentId)?.features || []).includes('auto_bucket') && (
-            <button
-              className={`nav-item ${view === 'auto-enablement' ? 'active' : ''}`}
-              onClick={() => setView('auto-enablement')}
-              title="Auto Bucket Mgmt"
-            >
-              <Clock size={20} /> {!sidebarCollapsed && 'Auto Bucket Mgmt'}
-            </button>
+              <button
+                className={`nav-item ${view === 'requests' ? 'active' : ''}`}
+                onClick={() => setView('requests')}
+                title="Requests"
+              >
+                <FileText size={20} /> {!sidebarCollapsed && 'Requests'}
+              </button>
+              {userRole?.canEdit && (
+                <button
+                  className={`nav-item ${view === 'review' ? 'active' : ''}`}
+                  onClick={() => setView('review')}
+                  title="Review"
+                >
+                  <CheckSquare size={20} /> {!sidebarCollapsed && 'Approvals'}
+                </button>
+              )}
+              {isAdmin && selectedDepartmentId && (departments.find(d => d.id === selectedDepartmentId)?.features || []).includes('auto_bucket') && (
+                <button
+                  className={`nav-item ${view === 'auto-enablement' ? 'active' : ''}`}
+                  onClick={() => setView('auto-enablement')}
+                  title="Auto Bucket Mgmt"
+                >
+                  <Clock size={20} /> {!sidebarCollapsed && 'Auto Bucket Mgmt'}
+                </button>
+              )}
+            </>
           )}
         </nav>
 
@@ -3453,6 +3499,17 @@ function AuthenticatedApp({ onLogout }) {
               departments={departments}
             />
           )}
+          {view === 'solutions' && (
+            <SolutionsDashboard
+              currentDate={currentDate}
+              departmentId={selectedDepartmentId}
+            />
+          )}
+          {view === 'se-bandwidth' && (
+            <SEBandwidth
+              departmentId={selectedDepartmentId}
+            />
+          )}
         </main>
       </div>
 
@@ -3510,42 +3567,63 @@ function AuthenticatedApp({ onLogout }) {
 
       {/* Mobile Bottom Navigation */}
       <nav className="mobile-nav">
-        <button
-          className={`mobile-nav-item ${view === 'dashboard' ? 'active' : ''}`}
-          onClick={() => setView('dashboard')}
-        >
-          <LayoutGrid size={20} />
-          Overview
-        </button>
-        <button
-          className={`mobile-nav-item ${view === 'roster' ? 'active' : ''}`}
-          onClick={() => setView('roster')}
-        >
-          <Calendar size={20} />
-          Roster
-        </button>
-        <button
-          className={`mobile-nav-item ${view === 'summary' ? 'active' : ''}`}
-          onClick={() => setView('summary')}
-        >
-          <PieChart size={20} />
-          Reports
-        </button>
-        <button
-          className={`mobile-nav-item ${view === 'requests' ? 'active' : ''}`}
-          onClick={() => setView('requests')}
-        >
-          <FileText size={20} />
-          Requests
-        </button>
-        {userRole?.canEdit && (
-          <button
-            className={`mobile-nav-item ${view === 'review' ? 'active' : ''}`}
-            onClick={() => setView('review')}
-          >
-            <CheckSquare size={20} />
-            Approvals
-          </button>
+        {isSolutionsDept ? (
+          <>
+            <button
+              className={`mobile-nav-item ${view === 'se-bandwidth' ? 'active' : ''}`}
+              onClick={() => setView('se-bandwidth')}
+            >
+              <Headphones size={20} />
+              SE Bandwidth
+            </button>
+            <button
+              className={`mobile-nav-item ${view === 'solutions' ? 'active' : ''}`}
+              onClick={() => setView('solutions')}
+            >
+              <LayoutDashboard size={20} />
+              Score Card
+            </button>
+          </>
+        ) : (
+          <>
+            <button
+              className={`mobile-nav-item ${view === 'dashboard' ? 'active' : ''}`}
+              onClick={() => setView('dashboard')}
+            >
+              <LayoutGrid size={20} />
+              Overview
+            </button>
+            <button
+              className={`mobile-nav-item ${view === 'roster' ? 'active' : ''}`}
+              onClick={() => setView('roster')}
+            >
+              <Calendar size={20} />
+              Roster
+            </button>
+            <button
+              className={`mobile-nav-item ${view === 'summary' ? 'active' : ''}`}
+              onClick={() => setView('summary')}
+            >
+              <PieChart size={20} />
+              Reports
+            </button>
+            <button
+              className={`mobile-nav-item ${view === 'requests' ? 'active' : ''}`}
+              onClick={() => setView('requests')}
+            >
+              <FileText size={20} />
+              Requests
+            </button>
+            {userRole?.canEdit && (
+              <button
+                className={`mobile-nav-item ${view === 'review' ? 'active' : ''}`}
+                onClick={() => setView('review')}
+              >
+                <CheckSquare size={20} />
+                Approvals
+              </button>
+            )}
+          </>
         )}
       </nav>
 
