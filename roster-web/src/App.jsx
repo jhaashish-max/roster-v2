@@ -66,7 +66,7 @@ const DEVREV_TOKEN = import.meta.env.VITE_DEVREV_TOKEN || '';
 const DEVREV_SPRINT_ID = import.meta.env.VITE_DEVREV_SPRINT_ID || 'don:core:dvrv-in-1:devo/2sRI6Hepzz:vista/2908:vista_group_item/7226';
 const DEVREV_ORG = import.meta.env.VITE_DEVREV_ORG || 'razorpay';
 
-// Slack config
+// Slack config (PS-POS)
 const SLACK_BOT_TOKEN = import.meta.env.VITE_SLACK_BOT_TOKEN || '';
 const SLACK_SEARCH_HANDLE = import.meta.env.VITE_SLACK_SEARCH_HANDLE || 'ps-pos-tech-oncall';
 const SLACK_WORKSPACE = import.meta.env.VITE_SLACK_WORKSPACE || 'razorpay';
@@ -79,6 +79,58 @@ const SLACK_CHANNEL_IDS = (import.meta.env.VITE_SLACK_CHANNEL_IDS || '')
 // In dev: Vite proxies /api/slack → https://slack.com/api (bypasses CORS)
 // In prod: Cloudflare Worker at VITE_API_BASE_URL must proxy /api/slack → https://slack.com/api
 const SLACK_API_BASE = IS_DEV ? '/api/slack' : `${import.meta.env.VITE_API_BASE_URL}/api/slack`;
+
+// Slack config (PS-Enterprise)
+const PS_ENT_SLACK_SEARCH_HANDLE = import.meta.env.VITE_PS_ENT_SLACK_SEARCH_HANDLE || 'ps_enterprise_oncall';
+const PS_ENT_SLACK_SUBTEAM_ID = import.meta.env.VITE_PS_ENT_SLACK_SUBTEAM_ID || '';
+const PS_ENT_SLACK_CHANNEL_IDS = (import.meta.env.VITE_PS_ENT_SLACK_CHANNEL_IDS || import.meta.env.VITE_SLACK_CHANNEL_IDS || '')
+  .split(',').map(s => s.trim()).filter(Boolean);
+
+// DevRev parts for PS-Enterprise team
+const DEVREV_PS_ENTERPRISE_PARTS = [
+  'don:core:dvrv-in-1:devo/2sRI6Hepzz:feature/253',
+];
+
+// Team configs — used to parameterize PS dashboard components per department
+const PS_POS_TEAM_CONFIG = {
+  label: 'PS-POS',
+  devrevMode: 'sprint',
+  devrevSprintId: DEVREV_SPRINT_ID,
+  devrevBoardUrl: `https://app.devrev.ai/${DEVREV_ORG}`,
+  slackHandle: SLACK_SEARCH_HANDLE,
+  slackSubteamId: SLACK_SUBTEAM_ID,
+  slackChannelIds: SLACK_CHANNEL_IDS,
+  cacheKeySuffix: 'pos',
+};
+const PS_ENT_TEAM_CONFIG = {
+  label: 'PS-Enterprise',
+  devrevMode: 'parts',
+  devrevParts: DEVREV_PS_ENTERPRISE_PARTS,
+  devrevBoardUrl: `https://app.devrev.ai/${DEVREV_ORG}/parts?quickAccessId=don%3Acore%3Advrv-in-1%3Adevo%2F2sRI6Hepzz%3Avista%2Fdef-parts&vista_view_type=list&categories=dev_part&parent_parts=%7B%22include_child_parts%22%3Afalse%2C%22parts%22%3A%5B%22don%3Acore%3Advrv-in-1%3Adevo%2F2sRI6Hepzz%3Afeature%2F253%22%5D%7D`,
+  slackHandle: PS_ENT_SLACK_SEARCH_HANDLE,
+  slackSubteamId: PS_ENT_SLACK_SUBTEAM_ID,
+  slackChannelIds: PS_ENT_SLACK_CHANNEL_IDS,
+  cacheKeySuffix: 'ent',
+};
+// Returns the correct team config based on department name/slug
+const getTeamConfig = (dept) => {
+  if (!dept) return PS_POS_TEAM_CONFIG;
+  const name = (dept.name || '').toLowerCase();
+  const slug = (dept.slug || '').toLowerCase();
+  if (name.includes('enterprise') || slug.includes('enterprise')) return PS_ENT_TEAM_CONFIG;
+  return PS_POS_TEAM_CONFIG;
+};
+// Builds URLSearchParams for works.list based on team config
+const buildDevRevParams = (teamConfig, cursor) => {
+  const params = new URLSearchParams({ type: 'issue', limit: '100' });
+  if (teamConfig.devrevMode === 'sprint') {
+    params.append('issue.sprint', teamConfig.devrevSprintId);
+  } else {
+    (teamConfig.devrevParts || []).forEach(p => params.append('applies_to_part', p));
+  }
+  if (cursor) params.append('cursor', cursor);
+  return params;
+};
 
 // Default prompt template for roster generation
 const DEFAULT_PROMPT = `You are a Roster Manager. Generate a JSON schedule for the '{{TEAM_NAME}}' team for {{MONTH_NAME}} {{YEAR}}.
@@ -281,7 +333,7 @@ const getStatusClass = (status, dateObj) => {
 };
 
 // ─── PS DASHBOARD HOME (Alchemist-style summary) ──────────────────────────────────
-const PSDashboardHome = ({ deptName, sheets = [] }) => {
+const PSDashboardHome = ({ deptName, sheets = [], teamConfig = PS_POS_TEAM_CONFIG }) => {
   // DevRev tickets for Recent Activity
   const [tickets, setTickets] = useState([]);
 
@@ -298,8 +350,7 @@ const PSDashboardHome = ({ deptName, sheets = [] }) => {
       try {
         let allWorks = [], cursor = null;
         do {
-          const params = new URLSearchParams({ type: 'issue', 'issue.sprint': DEVREV_SPRINT_ID, limit: '100' });
-          if (cursor) params.append('cursor', cursor);
+          const params = buildDevRevParams(teamConfig, cursor);
           const res = await fetch(`https://api.devrev.ai/works.list?${params}`, { headers: { 'Authorization': `Bearer ${DEVREV_TOKEN}` } });
           if (!res.ok) break;
           const data = await res.json();
@@ -310,7 +361,7 @@ const PSDashboardHome = ({ deptName, sheets = [] }) => {
         setTickets(allWorks);
       } catch { }
     })();
-  }, []);
+  }, [teamConfig]);
 
   // Background load: AI Insights from Google Sheet tab "ai projects"
   useEffect(() => {
@@ -340,6 +391,25 @@ const PSDashboardHome = ({ deptName, sheets = [] }) => {
     [...tickets].sort((a, b) => new Date(b.modified_date || b.created_date) - new Date(a.modified_date || a.created_date)).slice(0, 3),
   [tickets]);
 
+  const metrics = useMemo(() => {
+    if (!tickets.length) return { openIssues: 0, teamSize: 0, inProgress: 0 };
+    const terminalStages = new Set(['completed', 'done', 'wont_fix', 'archived']);
+    const normalize = name => (name || '').toLowerCase().replace(/\s+/g, '_');
+    const active = tickets.filter(t => !terminalStages.has(normalize(t.stage?.name)));
+    const inProgress = tickets.filter(t => ['in_progress', 'in_review'].includes(normalize(t.stage?.name))).length;
+    const owners = new Set(
+      tickets.flatMap(t => (t.owned_by || [])
+        .filter(o => o.display_name !== 'Unassigned' && o.type !== 'service_account')
+        .map(o => o.email || o.display_name)
+      ).filter(Boolean)
+    );
+    return {
+      openIssues: active.length,
+      inProgress,
+      teamSize: owners.size,
+    };
+  }, [tickets]);
+
   const cardStyle = (bg) => ({
     padding: '1.25rem', borderRadius: '12px', background: bg,
     border: '1px solid var(--border-color)', flex: 1, minWidth: '200px',
@@ -361,26 +431,32 @@ const PSDashboardHome = ({ deptName, sheets = [] }) => {
       {/* Key Metrics + Recent Activity + AI Insights — 3 cards */}
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '0.75rem' }}>
 
-        {/* Key Metrics — hardcoded */}
+        {/* Key Metrics — computed from tickets */}
         <div style={cardStyle('linear-gradient(135deg, #4f46e5, #7c3aed)')}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', marginBottom: '1rem' }}>
             <PieChart size={16} color="#fff" />
             <span style={{ fontSize: '0.85rem', fontWeight: 600, color: '#fff' }}>Key Metrics</span>
           </div>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.6rem' }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-              <span style={metricLabel}>Active Projects</span>
-              <span style={metricValue}>3</span>
+          {!tickets.length ? (
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', color: 'rgba(255,255,255,0.7)', fontSize: '0.78rem' }}>
+              <Loader2 size={14} className="spin" /> Loading...
             </div>
-            <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-              <span style={metricLabel}>Completed Tasks</span>
-              <span style={metricValue}>143</span>
+          ) : (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.6rem' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                <span style={metricLabel}>Open Issues</span>
+                <span style={metricValue}>{metrics.openIssues}</span>
+              </div>
+              <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                <span style={metricLabel}>In Progress</span>
+                <span style={metricValue}>{metrics.inProgress}</span>
+              </div>
+              <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                <span style={metricLabel}>Team Members</span>
+                <span style={metricValue}>{metrics.teamSize}</span>
+              </div>
             </div>
-            <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-              <span style={metricLabel}>Efficiency Score</span>
-              <span style={metricValue}>81.3%</span>
-            </div>
-          </div>
+          )}
         </div>
 
         {/* Recent Activity — DevRev tickets */}
@@ -459,7 +535,7 @@ const PSDashboardHome = ({ deptName, sheets = [] }) => {
           <h3 style={{ fontSize: '0.85rem', fontWeight: 600, color: 'var(--text-primary)', marginBottom: '0.75rem' }}>Quick Actions</h3>
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.5rem' }}>
             {[
-              { label: 'DevRev Board', icon: <Briefcase size={16} />, color: '#4f46e5', href: `https://app.devrev.ai/${DEVREV_ORG}` },
+              { label: 'DevRev Board', icon: <Briefcase size={16} />, color: '#4f46e5', href: teamConfig.devrevBoardUrl },
               { label: 'Slack Channel', icon: <MessageSquare size={16} />, color: '#059669', href: `https://${SLACK_WORKSPACE}.slack.com` },
               { label: 'Google Sheets', icon: <TableIcon size={16} />, color: '#0ea5e9', href: sheets[0]?.url },
               { label: 'View Reports', icon: <PieChart size={16} />, color: '#7c3aed', href: '#' },
@@ -505,32 +581,47 @@ const PSDashboardHome = ({ deptName, sheets = [] }) => {
 };
 
 // ─── DEPT DASHBOARD (PS-POS style — 3 sections) ──────────────────────────────────
-const DevRevOverview = ({ deptName, onLoadMore, onOpenSlack, sheets = [] }) => {
+const DevRevOverview = ({ deptName, onLoadMore, onOpenSlack, sheets = [], teamConfig = PS_POS_TEAM_CONFIG }) => {
   const [tickets, setTickets] = useState([]);
   const [ticketsLoading, setTicketsLoading] = useState(true);
   const [linkedSheets, setLinkedSheets] = useState([]);
+  // Keep loading true until we have a definitive answer — avoid flash of "No sheets linked"
   const [sheetLoading, setSheetLoading] = useState(true);
+  const [sheetError, setSheetError] = useState('');
   const [slackMsgs, setSlackMsgs] = useState([]);
   const [slackLoading, setSlackLoading] = useState(true);
 
   // Section 1: Load data from all linked Google Sheets
-  useEffect(() => {
-    if (!sheets.length) { setSheetLoading(false); return; }
-    (async () => {
-      try {
-        const { importFromGoogleSheet } = await import('./lib/sheetsApi');
-        const results = [];
-        for (const s of sheets) {
-          try {
-            const tabs = await importFromGoogleSheet(s.url);
-            results.push({ label: s.label, url: s.url, tabs: tabs.filter(t => t.name !== 'Sheet1') });
-          } catch { }
+  const fetchSheets = useCallback(async () => {
+    if (!sheets.length) return; // stay in loading state — dept may not have loaded yet
+    setSheetError('');
+    try {
+      const { importFromGoogleSheet } = await import('./lib/sheetsApi');
+      const results = [];
+      for (const s of sheets) {
+        try {
+          const tabs = await importFromGoogleSheet(s.url);
+          results.push({ label: s.label, url: s.url, tabs: tabs.filter(t => t.data.length > 0) });
+        } catch (err) {
+          setSheetError(`Could not read sheet: ${err.message}`);
         }
-        setLinkedSheets(results);
-      } catch { setLinkedSheets([]); }
-      finally { setSheetLoading(false); }
-    })();
+      }
+      setLinkedSheets(results);
+    } catch (err) {
+      setSheetError(err.message || 'Failed to load sheets');
+      setLinkedSheets([]);
+    }
+    finally { setSheetLoading(false); }
   }, [sheets]);
+
+  useEffect(() => {
+    // If sheets is still empty after a short grace period, mark loading done
+    if (!sheets.length) {
+      const timer = setTimeout(() => setSheetLoading(false), 2000);
+      return () => clearTimeout(timer);
+    }
+    fetchSheets();
+  }, [sheets, fetchSheets]);
 
   // Section 2: DevRev tickets
   useEffect(() => {
@@ -539,8 +630,7 @@ const DevRevOverview = ({ deptName, onLoadMore, onOpenSlack, sheets = [] }) => {
       try {
         let allWorks = [], cursor = null;
         do {
-          const params = new URLSearchParams({ type: 'issue', 'issue.sprint': DEVREV_SPRINT_ID, limit: '100' });
-          if (cursor) params.append('cursor', cursor);
+          const params = buildDevRevParams(teamConfig, cursor);
           const res = await fetch(`https://api.devrev.ai/works.list?${params}`, { headers: { 'Authorization': `Bearer ${DEVREV_TOKEN}` } });
           if (!res.ok) break;
           const data = await res.json();
@@ -552,22 +642,24 @@ const DevRevOverview = ({ deptName, onLoadMore, onOpenSlack, sheets = [] }) => {
       } catch { }
       finally { setTicketsLoading(false); }
     })();
-  }, []);
+  }, [teamConfig]);
 
   // Section 3: Slack messages
   useEffect(() => {
-    if (!SLACK_BOT_TOKEN || SLACK_CHANNEL_IDS.length === 0) { setSlackLoading(false); return; }
+    const channelIds = teamConfig.slackChannelIds;
+    if (!SLACK_BOT_TOKEN || channelIds.length === 0) { setSlackLoading(false); return; }
     (async () => {
       try {
-        let subteamId = SLACK_SUBTEAM_ID;
+        const subteamId = teamConfig.slackSubteamId;
+        const searchHandle = teamConfig.slackHandle;
         const mentionsHandle = (text) => {
           if (!text) return false;
           if (subteamId && text.includes(`<!subteam^${subteamId}>`)) return true;
-          return text.includes(SLACK_SEARCH_HANDLE);
+          return text.includes(searchHandle);
         };
         const oldest = String(Math.floor(Date.now() / 1000) - 7 * 24 * 3600);
         const allMatches = [];
-        for (const chId of SLACK_CHANNEL_IDS.slice(0, 3)) {
+        for (const chId of channelIds.slice(0, 3)) {
           try {
             const data = await slackGet('conversations.history', { channel: chId, oldest, limit: '50' });
             (data.messages || [])
@@ -579,7 +671,7 @@ const DevRevOverview = ({ deptName, onLoadMore, onOpenSlack, sheets = [] }) => {
       } catch { }
       finally { setSlackLoading(false); }
     })();
-  }, []);
+  }, [teamConfig]);
 
   const statusCounts = useMemo(() => {
     const c = {};
@@ -696,6 +788,16 @@ const DevRevOverview = ({ deptName, onLoadMore, onOpenSlack, sheets = [] }) => {
       {/* ── Projects Tab ── */}
       {activeTab === 'projects' && (
         <div style={{ padding: '0 0.25rem' }}>
+          {sheetError && (
+            <div style={{ background: '#fef2f2', border: '1px solid #fca5a5', borderRadius: '8px', padding: '0.75rem 1rem', marginBottom: '0.75rem', display: 'flex', gap: '0.5rem', alignItems: 'flex-start' }}>
+              <AlertCircle size={15} style={{ color: '#dc2626', flexShrink: 0, marginTop: '0.1rem' }} />
+              <div style={{ flex: 1 }}>
+                <div style={{ fontSize: '0.78rem', fontWeight: 600, color: '#dc2626' }}>Sheet load error</div>
+                <div style={{ fontSize: '0.72rem', color: '#7f1d1d', marginTop: '0.15rem' }}>{sheetError}</div>
+              </div>
+              <button onClick={fetchSheets} style={{ background: 'none', border: '1px solid #fca5a5', borderRadius: '6px', padding: '0.2rem 0.5rem', fontSize: '0.72rem', color: '#dc2626', cursor: 'pointer' }}>Retry</button>
+            </div>
+          )}
           {sheetLoading ? (
             <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', color: 'var(--text-muted)', fontSize: '0.85rem', padding: '2rem', justifyContent: 'center' }}>
               <Loader2 size={18} className="spin" /> Loading project data...
@@ -704,6 +806,11 @@ const DevRevOverview = ({ deptName, onLoadMore, onOpenSlack, sheets = [] }) => {
             <div style={{ textAlign: 'center', padding: '2rem', color: 'var(--text-muted)' }}>
               <TableIcon size={28} style={{ marginBottom: '0.5rem', opacity: 0.5 }} />
               <p style={{ fontSize: '0.85rem' }}>No sheets linked. Click "Add Sheet" to connect a Google Sheet.</p>
+            </div>
+          ) : linkedSheets.every(s => s.tabs.length === 0) ? (
+            <div style={{ textAlign: 'center', padding: '2rem', color: 'var(--text-muted)' }}>
+              <TableIcon size={28} style={{ marginBottom: '0.5rem', opacity: 0.5 }} />
+              <p style={{ fontSize: '0.85rem' }}>Sheet was loaded but all tabs appear empty.</p>
             </div>
           ) : (
             linkedSheets.map((sheet, si) => (
@@ -814,7 +921,7 @@ const DevRevOverview = ({ deptName, onLoadMore, onOpenSlack, sheets = [] }) => {
           ) : slackMsgs.length === 0 ? (
             <div style={{ textAlign: 'center', padding: '2rem', color: 'var(--text-muted)' }}>
               <MessageSquare size={28} style={{ marginBottom: '0.5rem', opacity: 0.5 }} />
-              <p style={{ fontSize: '0.85rem' }}>No recent @{SLACK_SEARCH_HANDLE} mentions in the last 7 days.</p>
+              <p style={{ fontSize: '0.85rem' }}>No recent @{teamConfig.slackHandle} mentions in the last 7 days.</p>
             </div>
           ) : (
             <div style={{ background: 'var(--bg-card)', borderRadius: '10px', border: '1px solid var(--border-color)', padding: '1rem' }}>
@@ -849,19 +956,20 @@ const DevRevOverview = ({ deptName, onLoadMore, onOpenSlack, sheets = [] }) => {
 };
 
 // ─── PS PROJECT QUALITY & IMPACT ──────────────────────────────────
-const SHEETS_CACHE_KEY = 'ps_sheets_cache';
-
-const PSProjectQuality = ({ sheets = [] }) => {
+const PSProjectQuality = ({ sheets = [], teamConfig = PS_POS_TEAM_CONFIG }) => {
+  const sheetsCacheKey = `ps_sheets_cache_${teamConfig.cacheKeySuffix}`;
   const [allTabs, setAllTabs] = useState([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [lastCacheTime, setLastCacheTime] = useState(null);
+  const [fetchError, setFetchError] = useState('');
 
-  // Load from cache on mount (expires after 3 days)
+  // Load from cache on mount — skip if sheets list is non-empty (always do a fresh fetch in that case)
   useEffect(() => {
+    if (sheets.length > 0) return; // fresh fetch will run via fetchSheetData
     try {
-      const cached = JSON.parse(localStorage.getItem(SHEETS_CACHE_KEY));
-      if (cached && cached.tabs && cached.timestamp) {
+      const cached = JSON.parse(localStorage.getItem(sheetsCacheKey));
+      if (cached && cached.tabs && cached.timestamp && cached.tabs.length > 0) {
         const age = Date.now() - new Date(cached.timestamp).getTime();
         if (age < 3 * 24 * 60 * 60 * 1000) {
           setAllTabs(cached.tabs);
@@ -870,27 +978,35 @@ const PSProjectQuality = ({ sheets = [] }) => {
         }
       }
     } catch { }
-  }, []);
+  }, [sheetsCacheKey, sheets.length]);
 
   const fetchSheetData = useCallback(async (isRefresh = false) => {
     if (!sheets.length) { setLoading(false); return; }
     if (isRefresh) setRefreshing(true);
+    setFetchError('');
     try {
       const { importFromGoogleSheet } = await import('./lib/sheetsApi');
       const results = [];
       for (const s of sheets) {
         try {
           const tabs = await importFromGoogleSheet(s.url);
-          tabs.filter(t => t.name !== 'Sheet1' && t.data.length > 0).forEach(t => results.push(t));
-        } catch { }
+          // Include all non-empty tabs (don't filter by name — user may name tabs anything)
+          tabs.filter(t => t.data.length > 0).forEach(t => results.push(t));
+        } catch (err) {
+          setFetchError(`Could not read sheet: ${err.message}`);
+        }
       }
       setAllTabs(results);
       const now = new Date().toISOString();
       setLastCacheTime(now);
-      localStorage.setItem(SHEETS_CACHE_KEY, JSON.stringify({ tabs: results, timestamp: now }));
-    } catch { }
+      if (results.length > 0) {
+        localStorage.setItem(sheetsCacheKey, JSON.stringify({ tabs: results, timestamp: now }));
+      }
+    } catch (err) {
+      setFetchError(err.message || 'Failed to load sheet data');
+    }
     finally { setLoading(false); setRefreshing(false); }
-  }, [sheets]);
+  }, [sheets, sheetsCacheKey]);
 
   // Background refresh on mount
   useEffect(() => { fetchSheetData(); }, [fetchSheetData]);
@@ -998,10 +1114,30 @@ const PSProjectQuality = ({ sheets = [] }) => {
       <h2 style={{ fontSize: '1.25rem', fontWeight: 600, marginBottom: '0.25rem' }}>Project Quality & Impact Metrics</h2>
       <p style={{ fontSize: '0.85rem', color: 'var(--text-muted)', marginBottom: '1.25rem' }}>Monitor project quality, deliverable impact, and overall project health.</p>
 
+      {fetchError && (
+        <div style={{ background: '#fef2f2', border: '1px solid #fca5a5', borderRadius: '8px', padding: '0.75rem 1rem', marginBottom: '1rem', display: 'flex', gap: '0.5rem', alignItems: 'flex-start' }}>
+          <AlertCircle size={16} style={{ color: '#dc2626', flexShrink: 0, marginTop: '0.1rem' }} />
+          <div>
+            <div style={{ fontSize: '0.8rem', fontWeight: 600, color: '#dc2626' }}>Sheet load error</div>
+            <div style={{ fontSize: '0.75rem', color: '#7f1d1d', marginTop: '0.2rem' }}>{fetchError}</div>
+          </div>
+        </div>
+      )}
       {projects.length === 0 ? (
         <div style={{ textAlign: 'center', padding: '2rem', color: 'var(--text-muted)' }}>
           <Briefcase size={28} style={{ marginBottom: '0.5rem', opacity: 0.5 }} />
-          <p style={{ fontSize: '0.85rem' }}>No project data found. Add Google Sheet links with project details in the master config.</p>
+          <p style={{ fontSize: '0.85rem' }}>
+            {sheets.length === 0
+              ? 'No sheet linked. Use "Add Sheet" from the Dashboard to link a Google Sheet.'
+              : allTabs.length === 0
+                ? 'Sheet was read but contains no data. Make sure the sheet has at least one tab with rows.'
+                : 'No project rows found. Ensure a column is named "Project", "Name", or "Merchant".'}
+          </p>
+          {allTabs.length > 0 && (
+            <p style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '0.25rem' }}>
+              Tabs found: {allTabs.map(t => `"${t.name}"`).join(', ')}
+            </p>
+          )}
         </div>
       ) : (
         <>
@@ -1172,9 +1308,8 @@ const PSProjectQuality = ({ sheets = [] }) => {
 };
 
 // ─── PS TEAM HEALTH & ENGAGEMENT ──────────────────────────────────
-const SLACK_CACHE_KEY = 'ps_slack_cache';
-
-const PSTeamHealth = () => {
+const PSTeamHealth = ({ teamConfig = PS_POS_TEAM_CONFIG }) => {
+  const slackCacheKey = `ps_slack_cache_${teamConfig.cacheKeySuffix}`;
   const [tickets, setTickets] = useState([]);
   const [slackMsgs, setSlackMsgs] = useState([]);
   const [slackEngagement, setSlackEngagement] = useState({});
@@ -1186,7 +1321,7 @@ const PSTeamHealth = () => {
   // Load from cache on mount (expires after 3 days)
   useEffect(() => {
     try {
-      const cached = JSON.parse(localStorage.getItem(SLACK_CACHE_KEY));
+      const cached = JSON.parse(localStorage.getItem(slackCacheKey));
       if (cached && cached.msgs && cached.engagement && cached.timestamp) {
         const age = Date.now() - new Date(cached.timestamp).getTime();
         const threeDays = 3 * 24 * 60 * 60 * 1000;
@@ -1198,7 +1333,7 @@ const PSTeamHealth = () => {
         }
       }
     } catch { }
-  }, []);
+  }, [slackCacheKey]);
 
   useEffect(() => {
     if (!DEVREV_TOKEN) { setTicketsLoading(false); return; }
@@ -1206,8 +1341,7 @@ const PSTeamHealth = () => {
       try {
         let allWorks = [], cursor = null;
         do {
-          const params = new URLSearchParams({ type: 'issue', 'issue.sprint': DEVREV_SPRINT_ID, limit: '100' });
-          if (cursor) params.append('cursor', cursor);
+          const params = buildDevRevParams(teamConfig, cursor);
           const res = await fetch(`https://api.devrev.ai/works.list?${params}`, { headers: { 'Authorization': `Bearer ${DEVREV_TOKEN}` } });
           if (!res.ok) break;
           const data = await res.json();
@@ -1219,23 +1353,25 @@ const PSTeamHealth = () => {
       } catch { }
       finally { setTicketsLoading(false); }
     })();
-  }, []);
+  }, [teamConfig]);
 
   const fetchSlackData = useCallback(async (isRefresh = false) => {
-    if (!SLACK_BOT_TOKEN || SLACK_CHANNEL_IDS.length === 0) { setSlackLoading(false); return; }
+    const channelIds = teamConfig.slackChannelIds;
+    if (!SLACK_BOT_TOKEN || channelIds.length === 0) { setSlackLoading(false); return; }
     if (isRefresh) setSlackRefreshing(true);
     try {
-      let subteamId = SLACK_SUBTEAM_ID;
+      const subteamId = teamConfig.slackSubteamId;
+      const searchHandle = teamConfig.slackHandle;
       const mentionsHandle = (text) => {
         if (!text) return false;
         if (subteamId && text.includes(`<!subteam^${subteamId}>`)) return true;
-        return text.includes(SLACK_SEARCH_HANDLE);
+        return text.includes(searchHandle);
       };
       const oldest = String(Math.floor(Date.now() / 1000) - 15 * 24 * 3600);
       const allMatches = [];
       const engagement = {};
       const threadStarters = {};
-      for (const chId of SLACK_CHANNEL_IDS) {
+      for (const chId of channelIds) {
         try {
           const data = await slackGet('conversations.history', { channel: chId, oldest, limit: '50' });
           const allMsgs = (data.messages || []);
@@ -1299,10 +1435,10 @@ const PSTeamHealth = () => {
       setSlackEngagement(namedEngagement);
       const now = new Date().toISOString();
       setLastCacheTime(now);
-      localStorage.setItem(SLACK_CACHE_KEY, JSON.stringify({ msgs: allMatches, engagement: namedEngagement, timestamp: now }));
+      localStorage.setItem(slackCacheKey, JSON.stringify({ msgs: allMatches, engagement: namedEngagement, timestamp: now }));
     } catch { }
     finally { setSlackLoading(false); setSlackRefreshing(false); }
-  }, []);
+  }, [teamConfig, slackCacheKey]);
 
   // Background refresh on mount (if cache exists, data is already shown)
   useEffect(() => { fetchSlackData(); }, [fetchSlackData]);
@@ -1417,7 +1553,7 @@ const PSTeamHealth = () => {
                 return isTeamMember(name);
               })
               .sort(([,a],[,b]) => (b.replies + (b.started || 0)) - (a.replies + (a.started || 0)));
-            if (teamEntries.length === 0) return <p style={{ fontSize: '0.78rem', color: 'var(--text-muted)' }}>No PS-POS member activity found.</p>;
+            if (teamEntries.length === 0) return <p style={{ fontSize: '0.78rem', color: 'var(--text-muted)' }}>No {teamConfig.label} member activity found.</p>;
             const maxActivity = Math.max(...teamEntries.map(([,e]) => e.replies + (e.started || 0)));
             return (
               <div style={{ display: 'flex', flexDirection: 'column', gap: '0.6rem' }}>
@@ -1553,7 +1689,7 @@ const PSTeamHealth = () => {
 };
 
 // ─── PS PRODUCTIVITY & TEAM METRICS ──────────────────────────────────
-const PSProductivityMetrics = () => {
+const PSProductivityMetrics = ({ teamConfig = PS_POS_TEAM_CONFIG }) => {
   const [tickets, setTickets] = useState([]);
   const [loading, setLoading] = useState(true);
 
@@ -1563,8 +1699,7 @@ const PSProductivityMetrics = () => {
       try {
         let allWorks = [], cursor = null;
         do {
-          const params = new URLSearchParams({ type: 'issue', 'issue.sprint': DEVREV_SPRINT_ID, limit: '100' });
-          if (cursor) params.append('cursor', cursor);
+          const params = buildDevRevParams(teamConfig, cursor);
           const res = await fetch(`https://api.devrev.ai/works.list?${params}`, { headers: { 'Authorization': `Bearer ${DEVREV_TOKEN}` } });
           if (!res.ok) break;
           const data = await res.json();
@@ -1576,7 +1711,7 @@ const PSProductivityMetrics = () => {
       } catch { }
       finally { setLoading(false); }
     })();
-  }, []);
+  }, [teamConfig]);
 
   const active = useMemo(() => tickets.filter(t => !['completed', 'done', 'wont_fix', 'archived'].includes(t.stage?.name?.toLowerCase())), [tickets]);
 
@@ -1728,7 +1863,7 @@ const PSProductivityMetrics = () => {
   );
 };
 
-const Dashboard = ({ rosterData, currentDate, onChangeDate, loading, headerAction, deptName, isSheetsEnabled, onOpenDevRev, onOpenSlack, sheets }) => {
+const Dashboard = ({ rosterData, currentDate, onChangeDate, loading, headerAction, deptName, isSheetsEnabled, onOpenDevRev, onOpenSlack, sheets, teamConfig = PS_POS_TEAM_CONFIG }) => {
   const [viewDate, setViewDate] = useState(new Date());
   const isViewingToday = format(viewDate, 'yyyy-MM-dd') === format(new Date(), 'yyyy-MM-dd');
 
@@ -1830,7 +1965,7 @@ const Dashboard = ({ rosterData, currentDate, onChangeDate, loading, headerActio
       </div>
 
       {isSheetsEnabled ? (
-        <PSDashboardHome deptName={deptName} sheets={sheets} />
+        <PSDashboardHome deptName={deptName} sheets={sheets} teamConfig={teamConfig} />
       ) : loading ? (
         <div className="loading-state">
           <Loader2 size={32} className="spin" />
@@ -2339,10 +2474,6 @@ const DEVREV_PRIORITY_STYLES = {
   p3: { bg: '#eff6ff', color: '#2563eb', label: 'P3' },
   p4: { bg: '#f9fafb', color: '#6b7280', label: 'P4' },
 };
-
-const DEVREV_PS_ENTERPRISE_PARTS = [
-  'don:core:dvrv-in-1:devo/2sRI6Hepzz:feature/253',
-];
 
 const DevRevTicketsModal = ({ onClose }) => {
   const [activeTeam, setActiveTeam] = useState('ps-pos'); // 'ps-pos' | 'ps-enterprise'
@@ -3267,17 +3398,38 @@ const SlackThreadsModal = ({ onClose }) => {
 
 // ─── DRIVE SHEET MODAL ──────────────────────────────────
 // ─── LINK / CREATE SHEET MODAL ──────────────────────────────────
-const LinkSheetModal = ({ deptName, deptId, onClose, onDone, onGlobalLoading }) => {
+const LinkSheetModal = ({ deptName, deptId, currentSheets = [], onClose, onDone, onGlobalLoading }) => {
   const [mode, setMode] = useState('link');
   const [sheetUrl, setSheetUrl] = useState('');
   const [sheetLabel, setSheetLabel] = useState('');
   const [newSheetName, setNewSheetName] = useState(`${deptName} Roster Db`);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
+  const [removingUrl, setRemovingUrl] = useState(null);
+  // Local copy so the list updates immediately after removal without waiting for parent reload
+  const [sheets, setSheets] = useState(currentSheets);
 
   const appendSheetToDept = async (sheetId) => {
     const { appendSheetIdToDept } = await import('./lib/sheetsApi');
     await appendSheetIdToDept(deptId, sheetId);
+  };
+
+  const handleRemoveSheet = async (url) => {
+    if (!window.confirm('Remove this sheet from the department?')) return;
+    setRemovingUrl(url);
+    try {
+      const { removeSheetFromDept, extractSpreadsheetId } = await import('./lib/sheetsApi');
+      const sheetId = extractSpreadsheetId(url) || url;
+      await removeSheetFromDept(deptId, sheetId);
+      // Update local list immediately so the UI reflects the change right away
+      setSheets(prev => prev.filter(s => s.url !== url));
+      // Refresh parent departments state but keep modal open
+      onDone?.(false);
+    } catch (err) {
+      alert('Failed to remove sheet: ' + err.message);
+    } finally {
+      setRemovingUrl(null);
+    }
   };
 
   const handleLinkSheet = async () => {
@@ -3323,12 +3475,40 @@ const LinkSheetModal = ({ deptName, deptId, onClose, onDone, onGlobalLoading }) 
         <div className="modal-header">
           <h2 style={{ fontSize: '1.1rem', fontWeight: 600 }}>
             <TableIcon size={18} style={{ verticalAlign: 'middle', marginRight: '0.5rem' }} />
-            Add Sheet — {deptName}
+            Manage Sheets — {deptName}
           </h2>
           <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-muted)' }}>
             <X size={20} />
           </button>
         </div>
+
+        {/* Linked sheets list with remove */}
+        {sheets.length > 0 && (
+          <div style={{ marginBottom: '1rem' }}>
+            <p style={{ fontSize: '0.75rem', fontWeight: 600, color: 'var(--text-muted)', marginBottom: '0.5rem', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+              Linked Sheets
+            </p>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.4rem' }}>
+              {sheets.map((s, i) => (
+                <div key={i} style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', padding: '0.5rem 0.75rem', borderRadius: '8px', background: 'var(--bg-secondary)', border: '1px solid var(--border-color)' }}>
+                  <TableIcon size={14} style={{ color: 'var(--accent-primary)', flexShrink: 0 }} />
+                  <a href={s.url} target="_blank" rel="noopener noreferrer"
+                    style={{ fontSize: '0.8rem', color: 'var(--accent-primary)', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    {s.label || `Sheet ${i + 1}`}
+                  </a>
+                  <button
+                    onClick={() => handleRemoveSheet(s.url)}
+                    disabled={removingUrl === s.url}
+                    style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--accent-danger)', padding: '0.1rem', display: 'flex', alignItems: 'center', flexShrink: 0 }}
+                    title="Remove sheet"
+                  >
+                    {removingUrl === s.url ? <Loader2 size={14} className="spin" /> : <X size={14} />}
+                  </button>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
 
         {/* Mode toggle */}
         <div style={{ display: 'flex', gap: '0.5rem', margin: '1rem 0' }}>
@@ -5957,6 +6137,7 @@ function AuthenticatedApp({ onLogout }) {
               onOpenDevRev={() => setShowDevRevModal(true)}
               onOpenSlack={() => setShowSlackModal(true)}
               sheets={dept?.sheets || []}
+              teamConfig={getTeamConfig(dept)}
               headerAction={
                 <div style={{ display: 'flex', gap: '1rem', alignItems: 'center' }}>
                   <TeamSelector teams={teams} selectedTeams={selectedTeams} setSelectedTeams={setSelectedTeams} />
@@ -6047,16 +6228,18 @@ function AuthenticatedApp({ onLogout }) {
             />
           )}
 
-          {/* PS-POS Pages — Placeholder views for incremental build */}
-          {view === 'ps-metrics' && (
-            <PSProductivityMetrics />
-          )}
-          {view === 'ps-health' && (
-            <PSTeamHealth />
-          )}
+          {/* PS Dashboard pages — shared by PS-POS and PS-Enterprise via teamConfig */}
+          {view === 'ps-metrics' && (() => {
+            const dept = departments.find(d => d.id === selectedDepartmentId);
+            return <PSProductivityMetrics teamConfig={getTeamConfig(dept)} />;
+          })()}
+          {view === 'ps-health' && (() => {
+            const dept = departments.find(d => d.id === selectedDepartmentId);
+            return <PSTeamHealth teamConfig={getTeamConfig(dept)} />;
+          })()}
           {view === 'ps-quality' && (() => {
             const dept = departments.find(d => d.id === selectedDepartmentId);
-            return <PSProjectQuality sheets={dept?.sheets || []} />;
+            return <PSProjectQuality sheets={dept?.sheets || []} teamConfig={getTeamConfig(dept)} />;
           })()}
           {view === 'ps-ownership' && (() => {
             const dept = departments.find(d => d.id === selectedDepartmentId);
@@ -6069,6 +6252,7 @@ function AuthenticatedApp({ onLogout }) {
                   onLoadMore={() => setShowDevRevModal(true)}
                   onOpenSlack={() => setShowSlackModal(true)}
                   sheets={dept?.sheets || []}
+                  teamConfig={getTeamConfig(dept)}
                 />
               </div>
             );
@@ -6136,8 +6320,13 @@ function AuthenticatedApp({ onLogout }) {
           <LinkSheetModal
             deptName={dept?.name || ''}
             deptId={selectedDepartmentId}
+            currentSheets={dept?.sheets || []}
             onClose={() => setShowLinkSheet(false)}
-            onDone={() => { setShowLinkSheet(false); loadDepartments(); setDashboardKey(k => k + 1); }}
+            onDone={(closeModal = true) => {
+              loadDepartments();
+              setDashboardKey(k => k + 1);
+              if (closeModal) setShowLinkSheet(false);
+            }}
             onGlobalLoading={setGlobalLoading}
           />
         );
