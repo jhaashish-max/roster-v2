@@ -1043,6 +1043,33 @@ const PSProjectQuality = ({ sheets = [], teamConfig = PS_POS_TEAM_CONFIG }) => {
   }, []);
 
   // Build revenue map from "Revenue" tab(s) — only from explicitly named revenue columns
+  const parseRevenue = (raw) => {
+    const s = String(raw || '').trim();
+    if (!s || /^n\/?a$/i.test(s)) return 0;
+    const lines = s.split(/\n/).map(l => l.trim()).filter(Boolean);
+    let best = 0;
+    for (const line of lines) {
+      if (/^n\/?a$/i.test(line.trim())) continue;
+      const cleaned = line.replace(/^.*?(?:NR|Net Revenue)\s*[-–:]\s*/i, '').replace(/~|approx\.?/gi, '').trim();
+      if (!cleaned) continue;
+      const rangeMatch = cleaned.match(/([\d,]+(?:\.\d+)?)\s*[-–to]+\s*([\d,]+(?:\.\d+)?)/);
+      let num;
+      if (rangeMatch) {
+        const a = parseFloat(rangeMatch[1].replace(/,/g, '')) || 0;
+        const b = parseFloat(rangeMatch[2].replace(/,/g, '')) || 0;
+        num = Math.max(a, b);
+      } else {
+        const numMatch = cleaned.match(/([\d,]+(?:\.\d+)?)/);
+        if (!numMatch) continue;
+        num = parseFloat(numMatch[1].replace(/,/g, '')) || 0;
+      }
+      if (/crore|cr\b/i.test(cleaned)) num *= 1e7;
+      else if (/lakh|lac|lacs|lakhs/i.test(cleaned)) num *= 1e5;
+      if (num > best) best = num;
+    }
+    return best;
+  };
+
   const revenueMap = useMemo(() => {
     const map = {};
     const revTabs = allTabs.filter(t => t.name.toLowerCase().includes('revenue'));
@@ -1054,7 +1081,7 @@ const PSProjectQuality = ({ sheets = [], teamConfig = PS_POS_TEAM_CONFIG }) => {
       if (revIdx < 0) continue; // no recognized revenue column — skip to avoid summing wrong columns
       tab.data.forEach(row => {
         const name = String(row[nameIdx] || '').trim().toLowerCase();
-        if (name) map[name] = (map[name] || 0) + (parseFloat(String(row[revIdx] || '0').replace(/[^0-9.-]/g, '')) || 0);
+        if (name) map[name] = (map[name] || 0) + parseRevenue(row[revIdx]);
       });
     }
     return map;
@@ -1074,7 +1101,7 @@ const PSProjectQuality = ({ sheets = [], teamConfig = PS_POS_TEAM_CONFIG }) => {
       tab.data.forEach(row => {
         const name = row[nameIdx];
         if (!name) return;
-        const inlineRev = revIdx >= 0 ? (parseFloat(String(row[revIdx] || '0').replace(/[^0-9.-]/g, '')) || 0) : 0;
+        const inlineRev = revIdx >= 0 ? parseRevenue(row[revIdx]) : 0;
         const sheetRev = revenueMap[String(name).trim().toLowerCase()] || 0;
         all.push({
           name, source: tab.name,
@@ -1119,9 +1146,6 @@ const PSProjectQuality = ({ sheets = [], teamConfig = PS_POS_TEAM_CONFIG }) => {
 
   const formatCurrency = (n) => {
     if (!n || n <= 0) return '—';
-    if (n >= 1e15) return `₹${Math.round(n / 1e15)}KCr`;   // ≥ 10^15 → shows e.g. ₹75KCr
-    if (n >= 1e12) return `₹${Math.round(n / 1e12)}LCr`;   // ≥ Lakh Crore
-    if (n >= 1e10) return `₹${Math.round(n / 1e10)}KCr`;   // ≥ 1000 Cr
     if (n >= 1e7)  return `₹${Math.round(n / 1e7)}Cr`;
     if (n >= 1e5)  return `₹${Math.round(n / 1e5)}L`;
     return `₹${n.toLocaleString('en-IN')}`;
