@@ -6,6 +6,16 @@ const DRIVE_BASE = 'https://www.googleapis.com/drive/v3/files';
 
 const deptSheetCache = {};
 
+// ─── In-memory caches to stay within Google Sheets read quota ───────────────
+// Cache importFromGoogleSheet results for 90s — prevents repeated reads when
+// multiple components (DevRevOverview + PSProjectQuality) load the same sheet.
+const _importCache = new Map();      // url  → { data, expires }
+const _importInFlight = new Map();   // url  → Promise  (deduplicates concurrent calls)
+const _metaCache = new Map();        // sheetId → { data, expires }
+const IMPORT_TTL  = 90  * 1000;
+const META_TTL    = 300 * 1000;
+// ────────────────────────────────────────────────────────────────────────────
+
 // ==================== INTERNAL HELPERS ====================
 
 async function sheetsFetch(url, options = {}) {
@@ -64,8 +74,12 @@ async function batchUpdate(spreadsheetId, requests) {
 }
 
 async function getSheetMetadata(spreadsheetId) {
+  const cached = _metaCache.get(spreadsheetId);
+  if (cached && cached.expires > Date.now()) return cached.data;
   const res = await sheetsFetch(`${SHEETS_BASE}/${spreadsheetId}?fields=sheets.properties`);
-  return res.json();
+  const data = await res.json();
+  _metaCache.set(spreadsheetId, { data, expires: Date.now() + META_TTL });
+  return data;
 }
 
 function rowsToObjects(rows) {
@@ -127,35 +141,80 @@ export function extractSpreadsheetId(url) {
 }
 
 export async function importFromGoogleSheet(sheetUrl) {
-  const id = extractSpreadsheetId(sheetUrl);
-  if (!id) throw new Error('Invalid Google Sheets URL');
-  const meta = await getSheetMetadata(id);
-  const tabNames = meta.sheets.map(s => s.properties.title);
-  const result = [];
-  for (const tab of tabNames) {
-    const rows = await readRange(id, `${tab}!A:Z`);
-    result.push({
-      name: tab,
-      headers: rows.length > 0 ? rows[0] : [],
-      data: rows.length > 1 ? rows.slice(1) : [],
+  // 1. Return from in-memory cache if fresh (avoids quota hits from multiple components)
+  const cached = _importCache.get(sheetUrl);
+  if (cached && cached.expires > Date.now()) return cached.data;
+
+  // 2. Deduplicate concurrent calls — return the same in-flight Promise
+  if (_importInFlight.has(sheetUrl)) return _importInFlight.get(sheetUrl);
+
+  const promise = (async () => {
+    const id = extractSpreadsheetId(sheetUrl);
+    if (!id) throw new Error('Invalid Google Sheets URL');
+
+    const meta = await getSheetMetadata(id);
+    const tabNames = meta.sheets.map(s => s.properties.title);
+    if (!tabNames.length) return [];
+
+    // 3. batchGet — fetch ALL tab data in ONE API call instead of N individual reads
+    const rangeParams = tabNames.map(t => `ranges=${encodeURIComponent(`${t}!A:Z`)}`).join('&');
+    const res = await sheetsFetch(
+      `${SHEETS_BASE}/${id}/values:batchGet?valueRenderOption=UNFORMATTED_VALUE&${rangeParams}`
+    );
+    const batchData = await res.json();
+
+    const result = (batchData.valueRanges || []).map((vr, i) => {
+      const rows = vr.values || [];
+      return {
+        name: tabNames[i],
+        headers: rows.length > 0 ? rows[0] : [],
+        data: rows.length > 1 ? rows.slice(1) : [],
+      };
     });
+
+    _importCache.set(sheetUrl, { data: result, expires: Date.now() + IMPORT_TTL });
+    return result;
+  })();
+
+  _importInFlight.set(sheetUrl, promise);
+  try {
+    return await promise;
+  } finally {
+    _importInFlight.delete(sheetUrl);
   }
-  return result;
 }
 
 // ==================== DEPARTMENT FUNCTIONS ====================
 
 export async function getDepartments() {
-  const rows = await readRange(MASTER_SHEET_ID, 'departments!A:E');
+  const rows = await readRange(MASTER_SHEET_ID, 'departments!A:Z');
   const raw = rowsToObjects(rows);
-  return raw.map(d => ({
-    id: d.department_id,
-    name: d.department_name,
-    slug: (d.department_name || '').toLowerCase().replace(/\s+/g, '-'),
-    spreadsheet_id: d.spreadsheet_id,
-    features: d.features ? d.features.split(',').map(f => f.trim()).filter(Boolean) : [],
-    created_at: d.created_at || new Date().toISOString(),
-  }));
+  return raw.map(d => {
+    const sheets = [];
+    // Support multiple sheet IDs/URLs in spreadsheet_id column (comma-separated)
+    if (d.spreadsheet_id && d.spreadsheet_id.trim()) {
+      d.spreadsheet_id.split(',').forEach((entry, idx) => {
+        const val = entry.trim();
+        if (!val) return;
+        const url = val.includes('docs.google.com') ? val : `https://docs.google.com/spreadsheets/d/${val}/edit`;
+        sheets.push({ url, label: `Sheet ${idx + 1}` });
+      });
+    }
+    // Support new format: sheet_1, sheet_1_label, sheet_2, etc.
+    for (let i = 1; i <= 5; i++) {
+      const url = d[`sheet_${i}`];
+      const label = d[`sheet_${i}_label`] || `Sheet ${i}`;
+      if (url && url.trim()) sheets.push({ url: url.trim(), label: label.trim() });
+    }
+    return {
+      id: d.department_id,
+      name: d.department_name,
+      slug: (d.department_name || '').toLowerCase().replace(/\s+/g, '-'),
+      features: d.features ? d.features.split(',').map(f => f.trim()).filter(Boolean) : [],
+      sheets,
+      created_at: d.created_at || new Date().toISOString(),
+    };
+  });
 }
 
 export async function createDepartment(name, slug) {
@@ -197,17 +256,30 @@ export async function createDriveSheetForDept(departmentId, departmentName, tabC
     }
   }
 
-  const rows = await readRange(MASTER_SHEET_ID, 'departments!A:E');
-  const rowIndex = rows.findIndex((r, i) => i > 0 && r[1] === departmentId);
-  if (rowIndex >= 0) {
-    const row = rows[rowIndex];
-    while (row.length < 5) row.push('');
-    row[2] = spreadsheetId;
-    await writeRange(MASTER_SHEET_ID, `departments!A${rowIndex + 1}:E${rowIndex + 1}`, [row]);
-  }
-
-  deptSheetCache[departmentId] = spreadsheetId;
   return { spreadsheetId, url: `https://docs.google.com/spreadsheets/d/${spreadsheetId}/edit` };
+}
+
+export async function appendSheetIdToDept(deptId, sheetId) {
+  const rows = await readRange(MASTER_SHEET_ID, 'departments!A:D');
+  const rowIndex = rows.findIndex((r, i) => i > 0 && r[1] === deptId);
+  if (rowIndex < 0) throw new Error('Department not found');
+  const existing = (rows[rowIndex][2] || '').trim();
+  const updated = existing ? `${existing},${sheetId}` : sheetId;
+  await writeRange(MASTER_SHEET_ID, `departments!C${rowIndex + 1}`, [[updated]]);
+}
+
+export async function removeSheetFromDept(deptId, sheetIdToRemove) {
+  const rows = await readRange(MASTER_SHEET_ID, 'departments!A:D');
+  const rowIndex = rows.findIndex((r, i) => i > 0 && r[1] === deptId);
+  if (rowIndex < 0) throw new Error('Department not found');
+  const existing = (rows[rowIndex][2] || '').trim();
+  const parts = existing.split(',').map(s => s.trim()).filter(Boolean);
+  const updated = parts.filter(p => {
+    // Match by sheet ID — p might be a full URL or just an ID
+    const id = p.includes('docs.google.com') ? extractSpreadsheetId(p) : p;
+    return id !== sheetIdToRemove;
+  }).join(',');
+  await writeRange(MASTER_SHEET_ID, `departments!C${rowIndex + 1}`, [[updated]]);
 }
 
 export async function updateDepartment(id, updates) {

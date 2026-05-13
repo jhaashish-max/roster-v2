@@ -38,7 +38,9 @@ import {
   HelpCircle,
   Phone,
   Building2,
-  Palette
+  Palette,
+  MessageSquare,
+  Hash
 } from 'lucide-react';
 import CellEditor from './components/CellEditor';
 import Summary from './components/Summary';
@@ -58,6 +60,79 @@ const IS_DEV = import.meta.env.DEV;
 const BASE_URL = IS_DEV ? '/api/n8n' : 'https://n8n-conc.razorpay.com';
 
 const N8N_WEBHOOK_URL = `${BASE_URL}/webhook/Roster-gen-v2`;
+
+// DevRev config
+const DEVREV_TOKEN = import.meta.env.VITE_DEVREV_TOKEN || '';
+const DEVREV_SPRINT_ID = import.meta.env.VITE_DEVREV_SPRINT_ID || 'don:core:dvrv-in-1:devo/2sRI6Hepzz:vista/2908:vista_group_item/7226';
+const DEVREV_ORG = import.meta.env.VITE_DEVREV_ORG || 'razorpay';
+
+// Slack config (PS-POS)
+const SLACK_BOT_TOKEN = import.meta.env.VITE_SLACK_BOT_TOKEN || '';
+const SLACK_SEARCH_HANDLE = import.meta.env.VITE_SLACK_SEARCH_HANDLE || 'ps-pos-tech-oncall';
+const SLACK_WORKSPACE = import.meta.env.VITE_SLACK_WORKSPACE || 'razorpay';
+// Optional: pre-set the subteam ID to avoid needing usergroups:read scope
+// Slack encodes @handle mentions as <!subteam^ID> — no handle name — so we must match by ID
+const SLACK_SUBTEAM_ID = import.meta.env.VITE_SLACK_SUBTEAM_ID || '';
+// Comma-separated Slack channel IDs to scan e.g. C12345,C67890
+const SLACK_CHANNEL_IDS = (import.meta.env.VITE_SLACK_CHANNEL_IDS || '')
+  .split(',').map(s => s.trim()).filter(Boolean);
+// In dev: Vite proxies /api/slack → https://slack.com/api (bypasses CORS)
+// In prod: Cloudflare Worker at VITE_API_BASE_URL must proxy /api/slack → https://slack.com/api
+const SLACK_API_BASE = IS_DEV ? '/api/slack' : `${import.meta.env.VITE_API_BASE_URL}/api/slack`;
+
+// Slack config (PS-Enterprise)
+const PS_ENT_SLACK_SEARCH_HANDLE = import.meta.env.VITE_PS_ENT_SLACK_SEARCH_HANDLE || 'ps_enterprise_oncall';
+const PS_ENT_SLACK_SUBTEAM_ID = import.meta.env.VITE_PS_ENT_SLACK_SUBTEAM_ID || '';
+const PS_ENT_SLACK_CHANNEL_IDS = (import.meta.env.VITE_PS_ENT_SLACK_CHANNEL_IDS || import.meta.env.VITE_SLACK_CHANNEL_IDS || '')
+  .split(',').map(s => s.trim()).filter(Boolean);
+
+// DevRev parts for PS-Enterprise team
+const DEVREV_PS_ENTERPRISE_PARTS = [
+  'don:core:dvrv-in-1:devo/2sRI6Hepzz:feature/253',
+];
+
+// Team configs — used to parameterize PS dashboard components per department
+const PS_POS_TEAM_CONFIG = {
+  label: 'PS-POS',
+  devrevMode: 'sprint',
+  devrevSprintId: DEVREV_SPRINT_ID,
+  devrevBoardUrl: `https://app.devrev.ai/${DEVREV_ORG}`,
+  slackHandle: SLACK_SEARCH_HANDLE,
+  slackSubteamId: SLACK_SUBTEAM_ID,
+  slackChannelIds: SLACK_CHANNEL_IDS,
+  cacheKeySuffix: 'pos',
+};
+const PS_ENT_TEAM_CONFIG = {
+  label: 'PS-Enterprise',
+  devrevMode: 'parts',
+  devrevParts: DEVREV_PS_ENTERPRISE_PARTS,
+  devrevBoardUrl: `https://app.devrev.ai/${DEVREV_ORG}/parts?quickAccessId=don%3Acore%3Advrv-in-1%3Adevo%2F2sRI6Hepzz%3Avista%2Fdef-parts&vista_view_type=list&categories=dev_part&parent_parts=%7B%22include_child_parts%22%3Afalse%2C%22parts%22%3A%5B%22don%3Acore%3Advrv-in-1%3Adevo%2F2sRI6Hepzz%3Afeature%2F253%22%5D%7D`,
+  slackHandle: PS_ENT_SLACK_SEARCH_HANDLE,
+  slackSubteamId: PS_ENT_SLACK_SUBTEAM_ID,
+  slackChannelIds: PS_ENT_SLACK_CHANNEL_IDS,
+  cacheKeySuffix: 'ent',
+  // Members who belong to PS-POS and should not appear on this board
+  excludeMembers: ['astha bhushan'],
+};
+// Returns the correct team config based on department name/slug
+const getTeamConfig = (dept) => {
+  if (!dept) return PS_POS_TEAM_CONFIG;
+  const name = (dept.name || '').toLowerCase();
+  const slug = (dept.slug || '').toLowerCase();
+  if (name.includes('enterprise') || slug.includes('enterprise')) return PS_ENT_TEAM_CONFIG;
+  return PS_POS_TEAM_CONFIG;
+};
+// Builds URLSearchParams for works.list based on team config
+const buildDevRevParams = (teamConfig, cursor) => {
+  const params = new URLSearchParams({ type: 'issue', limit: '100' });
+  if (teamConfig.devrevMode === 'sprint') {
+    params.append('issue.sprint', teamConfig.devrevSprintId);
+  } else {
+    (teamConfig.devrevParts || []).forEach(p => params.append('applies_to_part', p));
+  }
+  if (cursor) params.append('cursor', cursor);
+  return params;
+};
 
 // Default prompt template for roster generation
 const DEFAULT_PROMPT = `You are a Roster Manager. Generate a JSON schedule for the '{{TEAM_NAME}}' team for {{MONTH_NAME}} {{YEAR}}.
@@ -259,7 +334,1689 @@ const getStatusClass = (status, dateObj) => {
   return 'cell-other';
 };
 
-const Dashboard = ({ rosterData, currentDate, onChangeDate, loading, headerAction }) => {
+// ─── PS DASHBOARD HOME (Alchemist-style summary) ──────────────────────────────────
+const PSDashboardHome = ({ deptName, sheets = [], teamConfig = PS_POS_TEAM_CONFIG }) => {
+  // DevRev tickets for Recent Activity
+  const [tickets, setTickets] = useState([]);
+
+  // AI Insights from Google Sheet tab "ai projects"
+  const [aiInsights, setAiInsights] = useState([]);
+  const [aiHeaders, setAiHeaders] = useState([]);
+  const [aiInsightsLoading, setAiInsightsLoading] = useState(true);
+  const [showAllInsights, setShowAllInsights] = useState(false);
+
+  // Background load: DevRev tickets for Recent Activity
+  useEffect(() => {
+    if (!DEVREV_TOKEN) return;
+    (async () => {
+      try {
+        let allWorks = [], cursor = null;
+        do {
+          const params = buildDevRevParams(teamConfig, cursor);
+          const res = await fetch(`https://api.devrev.ai/works.list?${params}`, { headers: { 'Authorization': `Bearer ${DEVREV_TOKEN}` } });
+          if (!res.ok) break;
+          const data = await res.json();
+          allWorks = allWorks.concat(data.works || []);
+          cursor = data.next_cursor || null;
+          if (allWorks.length >= 500) break;
+        } while (cursor);
+        setTickets(allWorks);
+      } catch { }
+    })();
+  }, [teamConfig]);
+
+  // Background load: AI Insights from Google Sheet tab "ai projects"
+  useEffect(() => {
+    if (!sheets.length) { setAiInsightsLoading(false); return; }
+    (async () => {
+      try {
+        const { importFromGoogleSheet } = await import('./lib/sheetsApi');
+        console.log('[AI Insights] sheets:', sheets);
+        for (const s of sheets) {
+          console.log('[AI Insights] reading sheet:', s.url);
+          const tabs = await importFromGoogleSheet(s.url);
+          console.log('[AI Insights] tabs found:', tabs.map(t => t.name));
+          const aiTab = tabs.find(t => t.name.toLowerCase().includes('ai') && t.name.toLowerCase().includes('projects'));
+          if (aiTab && aiTab.data.length > 0) {
+            console.log('[AI Insights] found tab:', aiTab.name, 'headers:', aiTab.headers, 'rows:', aiTab.data.length);
+            setAiHeaders(aiTab.headers);
+            setAiInsights(aiTab.data);
+            break;
+          }
+        }
+      } catch (err) { console.error('[AI Insights] error:', err); }
+      finally { setAiInsightsLoading(false); }
+    })();
+  }, [sheets]);
+
+  const recentTickets = useMemo(() =>
+    [...tickets].sort((a, b) => new Date(b.modified_date || b.created_date) - new Date(a.modified_date || a.created_date)).slice(0, 3),
+  [tickets]);
+
+  const metrics = useMemo(() => {
+    if (!tickets.length) return { openIssues: 0, teamSize: 0, inProgress: 0 };
+    const terminalStages = new Set(['completed', 'done', 'wont_fix', 'archived']);
+    const normalize = name => (name || '').toLowerCase().replace(/\s+/g, '_');
+    const active = tickets.filter(t => !terminalStages.has(normalize(t.stage?.name)));
+    const inProgress = tickets.filter(t => ['in_progress', 'in_review'].includes(normalize(t.stage?.name))).length;
+    const owners = new Set(
+      tickets.flatMap(t => (t.owned_by || [])
+        .filter(o => o.display_name !== 'Unassigned' && o.type !== 'service_account')
+        .map(o => o.email || o.display_name)
+      ).filter(Boolean)
+    );
+    return {
+      openIssues: active.length,
+      inProgress,
+      teamSize: owners.size,
+    };
+  }, [tickets]);
+
+  const cardStyle = (bg) => ({
+    padding: '1.25rem', borderRadius: '12px', background: bg,
+    border: '1px solid var(--border-color)', flex: 1, minWidth: '200px',
+  });
+  const metricLabel = { fontSize: '0.75rem', color: 'rgba(255,255,255,0.7)', marginBottom: '0.15rem' };
+  const metricValue = { fontSize: '1.5rem', fontWeight: 700, color: '#fff' };
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
+      <div>
+        <h2 style={{ fontSize: '1.25rem', fontWeight: 700, color: 'var(--text-primary)', marginBottom: '0.25rem' }}>
+          Welcome to {deptName} Dashboard!
+        </h2>
+        <p style={{ fontSize: '0.85rem', color: 'var(--text-muted)', margin: 0 }}>
+          Get insights and manage your workspace efficiently.
+        </p>
+      </div>
+
+      {/* Key Metrics + Recent Activity + AI Insights — 3 cards */}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '0.75rem' }}>
+
+        {/* Key Metrics — computed from tickets */}
+        <div style={cardStyle('linear-gradient(135deg, #4f46e5, #7c3aed)')}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', marginBottom: '1rem' }}>
+            <PieChart size={16} color="#fff" />
+            <span style={{ fontSize: '0.85rem', fontWeight: 600, color: '#fff' }}>Key Metrics</span>
+          </div>
+          {!tickets.length ? (
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', color: 'rgba(255,255,255,0.7)', fontSize: '0.78rem' }}>
+              <Loader2 size={14} className="spin" /> Loading...
+            </div>
+          ) : (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.6rem' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                <span style={metricLabel}>Open Issues</span>
+                <span style={metricValue}>{metrics.openIssues}</span>
+              </div>
+              <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                <span style={metricLabel}>In Progress</span>
+                <span style={metricValue}>{metrics.inProgress}</span>
+              </div>
+              <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                <span style={metricLabel}>Team Members</span>
+                <span style={metricValue}>{metrics.teamSize}</span>
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* Recent Activity — DevRev tickets */}
+        <div style={cardStyle('linear-gradient(135deg, #059669, #10b981)')}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', marginBottom: '1rem' }}>
+            <Clock size={16} color="#fff" />
+            <span style={{ fontSize: '0.85rem', fontWeight: 600, color: '#fff' }}>Recent Activity</span>
+          </div>
+          {recentTickets.length === 0 ? (
+            <p style={{ fontSize: '0.78rem', color: 'rgba(255,255,255,0.7)' }}>No recent activity</p>
+          ) : (
+            recentTickets.map((t, i) => (
+              <a key={i} href={`https://app.devrev.ai/${DEVREV_ORG}/works/${t.display_id}`}
+                target="_blank" rel="noopener noreferrer" style={{ display: 'block', marginBottom: '0.5rem', textDecoration: 'none' }}>
+                <div style={{ fontSize: '0.78rem', color: '#fff', fontWeight: 500 }}>
+                  {t.title?.substring(0, 50)}{t.title?.length > 50 ? '...' : ''}
+                </div>
+                <div style={{ fontSize: '0.65rem', color: 'rgba(255,255,255,0.6)' }}>
+                  {t.stage?.name} — {t.display_id}
+                </div>
+              </a>
+            ))
+          )}
+        </div>
+
+        {/* AI Insights — from Google Sheet tab "AI Projects" */}
+        <div style={cardStyle('linear-gradient(135deg, #0ea5e9, #06b6d4)')}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', marginBottom: '1rem' }}>
+            <Wand2 size={16} color="#fff" />
+            <span style={{ fontSize: '0.85rem', fontWeight: 600, color: '#fff' }}>AI Insights</span>
+          </div>
+          {aiInsightsLoading ? (
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', color: 'rgba(255,255,255,0.7)', fontSize: '0.78rem' }}>
+              <Loader2 size={14} className="spin" /> Loading insights...
+            </div>
+          ) : aiInsights.length === 0 ? (
+            <p style={{ fontSize: '0.78rem', color: 'rgba(255,255,255,0.7)', lineHeight: 1.5 }}>
+              No AI Projects data found. Add an "AI Projects" tab in your linked Google Sheet.
+            </p>
+          ) : (() => {
+            const hIdx = {};
+            aiHeaders.forEach((h, i) => { hIdx[h.toLowerCase().trim()] = i; });
+            const nameIdx = hIdx['project'] ?? hIdx['project name'] ?? hIdx['name'] ?? 0;
+            const statusIdx = hIdx['status'] ?? hIdx['state'] ?? -1;
+            const items = showAllInsights ? aiInsights : aiInsights.slice(0, 3);
+            return (
+              <>
+                {items.map((row, i) => (
+                  <div key={i} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.4rem' }}>
+                    <span style={{ fontSize: '0.78rem', color: '#fff', fontWeight: 500 }}>{row[nameIdx] || row[0]}</span>
+                    {statusIdx >= 0 && row[statusIdx] && (
+                      <span style={{ fontSize: '0.65rem', fontWeight: 600, padding: '0.12rem 0.4rem', borderRadius: '4px', background: 'rgba(255,255,255,0.2)', color: '#fff' }}>
+                        {row[statusIdx]}
+                      </span>
+                    )}
+                  </div>
+                ))}
+              </>
+            );
+          })()}
+          {aiInsights.length > 3 && (
+            <button onClick={() => setShowAllInsights(prev => !prev)} style={{
+              marginTop: '0.5rem', background: 'rgba(255,255,255,0.2)', border: 'none', color: '#fff',
+              padding: '0.35rem 0.7rem', borderRadius: '6px', fontSize: '0.75rem', fontWeight: 600, cursor: 'pointer',
+            }}>
+              {showAllInsights ? 'Show Less' : `View More Insights (${aiInsights.length - 3} more) →`}
+            </button>
+          )}
+        </div>
+      </div>
+
+      {/* Quick Actions + AI Recommendations */}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: '0.75rem' }}>
+        {/* Quick Actions */}
+        <div style={{ background: 'var(--bg-card)', borderRadius: '12px', border: '1px solid var(--border-color)', padding: '1rem' }}>
+          <h3 style={{ fontSize: '0.85rem', fontWeight: 600, color: 'var(--text-primary)', marginBottom: '0.75rem' }}>Quick Actions</h3>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.5rem' }}>
+            {[
+              { label: 'DevRev Board', icon: <Briefcase size={16} />, color: '#4f46e5', href: teamConfig.devrevBoardUrl },
+              { label: 'Slack Channel', icon: <MessageSquare size={16} />, color: '#059669', href: `https://${SLACK_WORKSPACE}.slack.com` },
+              { label: 'Google Sheets', icon: <TableIcon size={16} />, color: '#0ea5e9', href: sheets[0]?.url },
+              { label: 'View Reports', icon: <PieChart size={16} />, color: '#7c3aed', href: '#' },
+            ].map((action, i) => (
+              <a key={i} href={action.href} target="_blank" rel="noopener noreferrer" style={{
+                display: 'flex', alignItems: 'center', gap: '0.5rem', padding: '0.65rem 0.75rem',
+                borderRadius: '8px', background: action.color + '12', border: `1px solid ${action.color}30`,
+                color: action.color, fontSize: '0.8rem', fontWeight: 600, textDecoration: 'none', cursor: 'pointer',
+              }}>
+                {action.icon} {action.label}
+              </a>
+            ))}
+          </div>
+        </div>
+
+        {/* AI Recommendations */}
+        <div style={{ background: 'var(--bg-card)', borderRadius: '12px', border: '1px solid var(--border-color)', padding: '1rem' }}>
+          <h3 style={{ fontSize: '0.85rem', fontWeight: 600, color: 'var(--text-primary)', marginBottom: '0.75rem' }}>AI Recommendations</h3>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+            <div style={{ padding: '0.6rem 0.75rem', borderRadius: '8px', background: 'var(--bg-hover)', border: '1px solid var(--border-color)' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', marginBottom: '0.2rem' }}>
+                <span style={{ fontSize: '0.7rem' }}>🎯</span>
+                <span style={{ fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-primary)' }}>Focus Time Suggestion</span>
+              </div>
+              <p style={{ fontSize: '0.72rem', color: 'var(--text-muted)', margin: 0 }}>
+                Block 2 hours tomorrow morning for deep work on active items.
+              </p>
+            </div>
+            <div style={{ padding: '0.6rem 0.75rem', borderRadius: '8px', background: 'var(--bg-hover)', border: '1px solid var(--border-color)' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', marginBottom: '0.2rem' }}>
+                <span style={{ fontSize: '0.7rem' }}>💬</span>
+                <span style={{ fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-primary)' }}>Communication Tip</span>
+              </div>
+              <p style={{ fontSize: '0.72rem', color: 'var(--text-muted)', margin: 0 }}>
+                Send follow-up on pending project requirements.
+              </p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// ─── DEPT DASHBOARD (PS-POS style — 3 sections) ──────────────────────────────────
+const DevRevOverview = ({ deptName, onLoadMore, onOpenSlack, sheets = [], teamConfig = PS_POS_TEAM_CONFIG }) => {
+  const [tickets, setTickets] = useState([]);
+  const [ticketsLoading, setTicketsLoading] = useState(true);
+  const [linkedSheets, setLinkedSheets] = useState([]);
+  // Keep loading true until we have a definitive answer — avoid flash of "No sheets linked"
+  const [sheetLoading, setSheetLoading] = useState(true);
+  const [sheetError, setSheetError] = useState('');
+  const [slackMsgs, setSlackMsgs] = useState([]);
+  const [slackLoading, setSlackLoading] = useState(true);
+
+  // Section 1: Load data from all linked Google Sheets
+  const fetchSheets = useCallback(async () => {
+    if (!sheets.length) return; // stay in loading state — dept may not have loaded yet
+    setSheetError('');
+    try {
+      const { importFromGoogleSheet } = await import('./lib/sheetsApi');
+      const results = [];
+      for (const s of sheets) {
+        try {
+          const tabs = await importFromGoogleSheet(s.url);
+          results.push({ label: s.label, url: s.url, tabs: tabs.filter(t => t.data.length > 0) });
+        } catch (err) {
+          setSheetError(`Could not read sheet: ${err.message}`);
+        }
+      }
+      setLinkedSheets(results);
+    } catch (err) {
+      setSheetError(err.message || 'Failed to load sheets');
+      setLinkedSheets([]);
+    }
+    finally { setSheetLoading(false); }
+  }, [sheets]);
+
+  useEffect(() => {
+    // If sheets is still empty after a short grace period, mark loading done
+    if (!sheets.length) {
+      const timer = setTimeout(() => setSheetLoading(false), 2000);
+      return () => clearTimeout(timer);
+    }
+    fetchSheets();
+  }, [sheets, fetchSheets]);
+
+  // Section 2: DevRev tickets
+  useEffect(() => {
+    if (!DEVREV_TOKEN) { setTicketsLoading(false); return; }
+    (async () => {
+      try {
+        let allWorks = [], cursor = null;
+        do {
+          const params = buildDevRevParams(teamConfig, cursor);
+          const res = await fetch(`https://api.devrev.ai/works.list?${params}`, { headers: { 'Authorization': `Bearer ${DEVREV_TOKEN}` } });
+          if (!res.ok) break;
+          const data = await res.json();
+          allWorks = allWorks.concat(data.works || []);
+          cursor = data.next_cursor || null;
+          if (allWorks.length >= 500) break;
+        } while (cursor);
+        setTickets(allWorks);
+      } catch { }
+      finally { setTicketsLoading(false); }
+    })();
+  }, [teamConfig]);
+
+  // Section 3: Slack messages
+  useEffect(() => {
+    const channelIds = teamConfig.slackChannelIds;
+    if (!SLACK_BOT_TOKEN || channelIds.length === 0) { setSlackLoading(false); return; }
+    (async () => {
+      try {
+        const subteamId = teamConfig.slackSubteamId;
+        const searchHandle = teamConfig.slackHandle;
+        const mentionsHandle = (text) => {
+          if (!text) return false;
+          if (subteamId && text.includes(`<!subteam^${subteamId}>`)) return true;
+          return text.includes(searchHandle);
+        };
+        const oldest = String(Math.floor(Date.now() / 1000) - 7 * 24 * 3600);
+        const allMatches = [];
+        for (const chId of channelIds.slice(0, 3)) {
+          try {
+            const data = await slackGet('conversations.history', { channel: chId, oldest, limit: '50' });
+            (data.messages || [])
+              .filter(m => mentionsHandle(m.text) && m.type === 'message' && !m.subtype)
+              .forEach(m => allMatches.push({ ...m, _channelId: chId }));
+          } catch { }
+        }
+        setSlackMsgs(allMatches.sort((a, b) => parseFloat(b.ts) - parseFloat(a.ts)).slice(0, 5));
+      } catch { }
+      finally { setSlackLoading(false); }
+    })();
+  }, [teamConfig]);
+
+  const statusCounts = useMemo(() => {
+    const c = {};
+    tickets.forEach(t => { const s = t.stage?.name?.toLowerCase().replace(/\s+/g, '_') || 'unknown'; c[s] = (c[s] || 0) + 1; });
+    return c;
+  }, [tickets]);
+
+  const recentTickets = useMemo(() =>
+    [...tickets].sort((a, b) => new Date(b.modified_date || b.created_date) - new Date(a.modified_date || a.created_date)).slice(0, 5),
+  [tickets]);
+
+  // Parse project data from all linked sheets
+  // Treats merchants, projects, features, support items — anything with a name column — as "projects"
+  const projects = useMemo(() => {
+    const allTabs = linkedSheets.flatMap(s => s.tabs);
+    if (!allTabs.length) return [];
+    const all = [];
+    for (const tab of allTabs) {
+      if (!tab.headers.length || !tab.data.length) continue;
+      const hIdx = {};
+      tab.headers.forEach((h, i) => { hIdx[h.toLowerCase().trim()] = i; });
+      // Find the name column — could be project, merchant, feature, name, etc.
+      const nameIdx = hIdx['project'] ?? hIdx['project name'] ?? hIdx['merchant'] ?? hIdx['feature'] ?? hIdx['name'] ?? hIdx['support'] ?? 0;
+      const revIdx = hIdx['revenue'] ?? hIdx['amount'] ?? hIdx['value'] ?? hIdx['mrr'] ?? hIdx['arr'] ?? -1;
+      const statusIdx = hIdx['status'] ?? hIdx['state'] ?? -1;
+      const ownerIdx = hIdx['owner'] ?? hIdx['assignee'] ?? hIdx['lead'] ?? hIdx['manager'] ?? -1;
+      const typeIdx = hIdx['type'] ?? hIdx['category'] ?? -1;
+      tab.data.forEach(row => {
+        const name = row[nameIdx] || '';
+        if (!name) return;
+        all.push({
+          project: name,
+          revenue: revIdx >= 0 ? (parseFloat(String(row[revIdx] || '0').replace(/[^0-9.-]/g, '')) || 0) : 0,
+          status: statusIdx >= 0 ? (row[statusIdx] || '') : '',
+          owner: ownerIdx >= 0 ? (row[ownerIdx] || '') : '',
+          type: typeIdx >= 0 ? (row[typeIdx] || '') : tab.name,
+          source: tab.name,
+        });
+      });
+    }
+    return all;
+  }, [linkedSheets]);
+
+  const totalRevenue = useMemo(() => projects.reduce((s, p) => s + p.revenue, 0), [projects]);
+  const totalProjects = useMemo(() => new Set(projects.map(p => p.project)).size, [projects]);
+  const activeProjects = useMemo(() => new Set(projects.filter(p => p.status.toLowerCase() === 'active').map(p => p.project)).size, [projects]);
+
+  const projectWise = useMemo(() => {
+    const map = {};
+    projects.forEach(p => {
+      if (!map[p.project]) map[p.project] = { revenue: 0, status: p.status, owner: p.owner, type: p.type, entries: 0 };
+      map[p.project].revenue += p.revenue;
+      map[p.project].entries++;
+    });
+    return Object.entries(map).sort(([, a], [, b]) => b.revenue - a.revenue);
+  }, [projects]);
+
+  const statusBreakdown = useMemo(() => {
+    const map = {};
+    projects.forEach(p => { const s = p.status || 'Unknown'; map[s] = (map[s] || 0) + (p.revenue > 0 ? p.revenue : 1); });
+    return Object.entries(map).filter(([, v]) => v > 0);
+  }, [projects]);
+
+  const typeBreakdown = useMemo(() => {
+    const map = {};
+    projects.forEach(p => { const t = p.type || p.source || 'Other'; map[t] = (map[t] || 0) + 1; });
+    return Object.entries(map).sort(([, a], [, b]) => b - a);
+  }, [projects]);
+
+  const [activeTab, setActiveTab] = useState('projects');
+  const formatCurrency = (n) => n >= 10000000 ? `₹${(n / 10000000).toFixed(1)}Cr` : n >= 100000 ? `₹${(n / 100000).toFixed(1)}L` : `₹${n.toLocaleString('en-IN')}`;
+  const STATUS_COLORS = { active: '#2563eb', completed: '#059669', 'on hold': '#d97706', cancelled: '#dc2626', planned: '#7c3aed' };
+
+  const TABS = [
+    { key: 'projects', label: 'Projects', icon: <TableIcon size={15} />, count: projects.length },
+    { key: 'devrev', label: 'DevRev Tickets', icon: <Briefcase size={15} />, count: tickets.length },
+    { key: 'slack', label: 'Slack Threads', icon: <MessageSquare size={15} />, count: slackMsgs.length },
+  ];
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: '0' }}>
+
+      {/* ── Tab Bar ── */}
+      <div style={{
+        display: 'flex', gap: '0', borderBottom: '2px solid var(--border-color)',
+        marginBottom: '1rem', background: 'var(--bg-card)', borderRadius: '10px 10px 0 0',
+      }}>
+        {TABS.map(tab => (
+          <button
+            key={tab.key}
+            onClick={() => setActiveTab(tab.key)}
+            style={{
+              flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.4rem',
+              padding: '0.75rem 1rem', border: 'none', cursor: 'pointer',
+              background: activeTab === tab.key ? 'var(--bg-card)' : 'transparent',
+              borderBottom: activeTab === tab.key ? '2px solid var(--accent-primary)' : '2px solid transparent',
+              color: activeTab === tab.key ? 'var(--accent-primary)' : 'var(--text-muted)',
+              fontSize: '0.82rem', fontWeight: activeTab === tab.key ? 600 : 500,
+              transition: 'all 0.15s',
+            }}
+          >
+            {tab.icon} {tab.label}
+            {tab.count > 0 && (
+              <span style={{
+                fontSize: '0.65rem', fontWeight: 600, padding: '0.1rem 0.4rem', borderRadius: '10px',
+                background: activeTab === tab.key ? 'var(--accent-primary)' : 'var(--bg-hover)',
+                color: activeTab === tab.key ? '#fff' : 'var(--text-muted)',
+              }}>{tab.count}</span>
+            )}
+          </button>
+        ))}
+      </div>
+
+      {/* ── Projects Tab ── */}
+      {activeTab === 'projects' && (
+        <div style={{ padding: '0 0.25rem' }}>
+          {sheetError && (
+            <div style={{ background: '#fef2f2', border: '1px solid #fca5a5', borderRadius: '8px', padding: '0.75rem 1rem', marginBottom: '0.75rem', display: 'flex', gap: '0.5rem', alignItems: 'flex-start' }}>
+              <AlertCircle size={15} style={{ color: '#dc2626', flexShrink: 0, marginTop: '0.1rem' }} />
+              <div style={{ flex: 1 }}>
+                <div style={{ fontSize: '0.78rem', fontWeight: 600, color: '#dc2626' }}>Sheet load error</div>
+                <div style={{ fontSize: '0.72rem', color: '#7f1d1d', marginTop: '0.15rem' }}>{sheetError}</div>
+              </div>
+              <button onClick={fetchSheets} style={{ background: 'none', border: '1px solid #fca5a5', borderRadius: '6px', padding: '0.2rem 0.5rem', fontSize: '0.72rem', color: '#dc2626', cursor: 'pointer' }}>Retry</button>
+            </div>
+          )}
+          {sheetLoading ? (
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', color: 'var(--text-muted)', fontSize: '0.85rem', padding: '2rem', justifyContent: 'center' }}>
+              <Loader2 size={18} className="spin" /> Loading project data...
+            </div>
+          ) : linkedSheets.length === 0 ? (
+            <div style={{ textAlign: 'center', padding: '2rem', color: 'var(--text-muted)' }}>
+              <TableIcon size={28} style={{ marginBottom: '0.5rem', opacity: 0.5 }} />
+              <p style={{ fontSize: '0.85rem' }}>No sheets linked. Click "Add Sheet" to connect a Google Sheet.</p>
+            </div>
+          ) : linkedSheets.every(s => s.tabs.length === 0) ? (
+            <div style={{ textAlign: 'center', padding: '2rem', color: 'var(--text-muted)' }}>
+              <TableIcon size={28} style={{ marginBottom: '0.5rem', opacity: 0.5 }} />
+              <p style={{ fontSize: '0.85rem' }}>Sheet was loaded but all tabs appear empty.</p>
+            </div>
+          ) : (
+            linkedSheets.map((sheet, si) => (
+              <div key={si}>
+                {sheet.tabs.map((tab, ti) => (
+                  <div key={ti} style={{
+                    background: 'var(--bg-card)', borderRadius: '10px', border: '1px solid var(--border-color)',
+                    padding: '1rem', marginBottom: '0.75rem',
+                  }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem' }}>
+                      <h4 style={{ fontSize: '0.85rem', fontWeight: 600, color: 'var(--text-primary)', margin: 0 }}>{tab.name}</h4>
+                      <span style={{ fontSize: '0.7rem', color: 'var(--text-muted)' }}>{tab.data.length} items</span>
+                    </div>
+                    <div style={{ overflowX: 'auto' }}>
+                      <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.78rem' }}>
+                        <thead>
+                          <tr>
+                            {tab.headers.map((h, hi) => (
+                              <th key={hi} style={{ padding: '0.4rem 0.6rem', textAlign: 'left', fontWeight: 600, color: 'var(--text-secondary)', borderBottom: '2px solid var(--border-color)', whiteSpace: 'nowrap', fontSize: '0.72rem' }}>{h}</th>
+                            ))}
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {tab.data.slice(0, 10).map((row, ri) => (
+                            <tr key={ri} style={{ background: ri % 2 === 0 ? 'transparent' : 'var(--bg-hover)' }}>
+                              {row.map((cell, ci) => (
+                                <td key={ci} style={{ padding: '0.4rem 0.6rem', borderBottom: '1px solid var(--border-color)', color: 'var(--text-primary)', whiteSpace: 'nowrap', maxWidth: '220px', overflow: 'hidden', textOverflow: 'ellipsis' }}>{cell}</td>
+                              ))}
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                      {tab.data.length > 10 && (
+                        <button onClick={() => window.open(sheet.url, '_blank')} style={{
+                          width: '100%', marginTop: '0.5rem', padding: '0.4rem', borderRadius: '6px',
+                          border: '1px solid var(--border-color)', background: 'var(--bg-hover)',
+                          color: 'var(--accent-primary)', fontSize: '0.75rem', fontWeight: 600,
+                          cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.3rem',
+                        }}>
+                          +{tab.data.length - 10} more — Open Sheet
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ))
+          )}
+        </div>
+      )}
+
+      {/* ── DevRev Tab ── */}
+      {activeTab === 'devrev' && (
+        <div style={{ padding: '0 0.25rem' }}>
+          {ticketsLoading ? (
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', color: 'var(--text-muted)', fontSize: '0.85rem', padding: '2rem', justifyContent: 'center' }}>
+              <Loader2 size={18} className="spin" /> Syncing tickets...
+            </div>
+          ) : !DEVREV_TOKEN ? (
+            <div style={{ textAlign: 'center', padding: '2rem', color: 'var(--text-muted)' }}>
+              <Briefcase size={28} style={{ marginBottom: '0.5rem', opacity: 0.5 }} />
+              <p style={{ fontSize: '0.85rem' }}>DevRev not configured. Set VITE_DEVREV_TOKEN in .env.</p>
+            </div>
+          ) : (
+            <div style={{ background: 'var(--bg-card)', borderRadius: '10px', border: '1px solid var(--border-color)', padding: '1rem' }}>
+              <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap', marginBottom: '0.75rem' }}>
+                <span style={{ padding: '0.25rem 0.6rem', borderRadius: '6px', background: '#dbeafe', color: '#1d4ed8', fontSize: '0.75rem', fontWeight: 600 }}>Total: {tickets.length}</span>
+                {Object.entries(DEVREV_STATUS_STYLES).map(([key, style]) => {
+                  const count = statusCounts[key];
+                  if (!count) return null;
+                  return <span key={key} style={{ padding: '0.25rem 0.6rem', borderRadius: '6px', background: style.bg, color: style.color, fontSize: '0.75rem', fontWeight: 600 }}>{style.label}: {count}</span>;
+                })}
+              </div>
+              {recentTickets.map(t => {
+                const stage = t.stage?.name?.toLowerCase().replace(/\s+/g, '_') || 'unknown';
+                const statusStyle = DEVREV_STATUS_STYLES[stage] || { bg: '#f3f4f6', color: '#6b7280', label: t.stage?.name || 'Unknown' };
+                const prioStyle = DEVREV_PRIORITY_STYLES[t.priority?.toLowerCase()] || {};
+                return (
+                  <a key={t.id} href={`https://app.devrev.ai/${DEVREV_ORG}/works/${t.display_id}`} target="_blank" rel="noopener noreferrer"
+                    style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', padding: '0.4rem 0', borderBottom: '1px solid var(--border-color)', textDecoration: 'none', color: 'inherit' }}>
+                    <span style={{ fontSize: '0.7rem', fontWeight: 600, color: 'var(--text-muted)', minWidth: '55px' }}>{t.display_id}</span>
+                    <span style={{ flex: 1, fontSize: '0.78rem', color: 'var(--text-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{t.title}</span>
+                    {prioStyle.label && <span style={{ padding: '0.12rem 0.35rem', borderRadius: '4px', background: prioStyle.bg, color: prioStyle.color, fontSize: '0.65rem', fontWeight: 600 }}>{prioStyle.label}</span>}
+                    <span style={{ padding: '0.12rem 0.35rem', borderRadius: '4px', background: statusStyle.bg, color: statusStyle.color, fontSize: '0.65rem', fontWeight: 600 }}>{statusStyle.label}</span>
+                  </a>
+                );
+              })}
+              <button onClick={onLoadMore} style={{
+                width: '100%', marginTop: '0.75rem', padding: '0.5rem', borderRadius: '8px',
+                border: '1px solid var(--border-color)', background: 'var(--bg-hover)',
+                color: 'var(--accent-primary)', fontSize: '0.8rem', fontWeight: 600,
+                cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.4rem',
+              }}>
+                <Briefcase size={14} /> Load More
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ── Slack Tab ── */}
+      {activeTab === 'slack' && (
+        <div style={{ padding: '0 0.25rem' }}>
+          {slackLoading ? (
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', color: 'var(--text-muted)', fontSize: '0.85rem', padding: '2rem', justifyContent: 'center' }}>
+              <Loader2 size={18} className="spin" /> Scanning channels...
+            </div>
+          ) : slackMsgs.length === 0 ? (
+            <div style={{ textAlign: 'center', padding: '2rem', color: 'var(--text-muted)' }}>
+              <MessageSquare size={28} style={{ marginBottom: '0.5rem', opacity: 0.5 }} />
+              <p style={{ fontSize: '0.85rem' }}>No recent @{teamConfig.slackHandle} mentions in the last 7 days.</p>
+            </div>
+          ) : (
+            <div style={{ background: 'var(--bg-card)', borderRadius: '10px', border: '1px solid var(--border-color)', padding: '1rem' }}>
+              {slackMsgs.map((m, i) => (
+                <a key={i} href={`https://${SLACK_WORKSPACE}.slack.com/archives/${m._channelId}/p${m.ts.replace('.', '')}`}
+                  target="_blank" rel="noopener noreferrer"
+                  style={{ display: 'block', padding: '0.5rem 0', borderBottom: '1px solid var(--border-color)', textDecoration: 'none', color: 'inherit' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '0.2rem' }}>
+                    <span style={{ fontSize: '0.7rem', color: 'var(--text-muted)' }}>
+                      {(() => { try { return format(new Date(parseFloat(m.ts) * 1000), 'MMM d, h:mm a'); } catch { return ''; } })()}
+                    </span>
+                  </div>
+                  <p style={{ fontSize: '0.78rem', color: 'var(--text-primary)', margin: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    {slackStripMarkup(m.text).substring(0, 120)}
+                  </p>
+                </a>
+              ))}
+              <button onClick={onOpenSlack} style={{
+                width: '100%', marginTop: '0.75rem', padding: '0.5rem', borderRadius: '8px',
+                border: '1px solid var(--border-color)', background: 'var(--bg-hover)',
+                color: 'var(--accent-primary)', fontSize: '0.8rem', fontWeight: 600,
+                cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.4rem',
+              }}>
+                <MessageSquare size={14} /> Load More
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+};
+
+// ─── PS PROJECT QUALITY & IMPACT ──────────────────────────────────
+const PS_POS_FEATURE_ID = 'don:core:dvrv-in-1:devo/2sRI6Hepzz:feature/250';
+
+const PSProjectQuality = ({ sheets = [], teamConfig = PS_POS_TEAM_CONFIG }) => {
+  const sheetsCacheKey = `ps_sheets_cache_${teamConfig.cacheKeySuffix}`;
+  const [allTabs, setAllTabs] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [enhancements, setEnhancements] = useState([]);
+  const [enhLoading, setEnhLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [lastCacheTime, setLastCacheTime] = useState(null);
+  const [fetchError, setFetchError] = useState('');
+
+  // Load from cache on mount — skip if sheets list is non-empty (always do a fresh fetch in that case)
+  useEffect(() => {
+    if (sheets.length > 0) return; // fresh fetch will run via fetchSheetData
+    try {
+      const cached = JSON.parse(localStorage.getItem(sheetsCacheKey));
+      if (cached && cached.tabs && cached.timestamp && cached.tabs.length > 0) {
+        const age = Date.now() - new Date(cached.timestamp).getTime();
+        if (age < 3 * 24 * 60 * 60 * 1000) {
+          setAllTabs(cached.tabs);
+          setLastCacheTime(cached.timestamp);
+          setLoading(false);
+        }
+      }
+    } catch { }
+  }, [sheetsCacheKey, sheets.length]);
+
+  const fetchSheetData = useCallback(async (isRefresh = false) => {
+    if (!sheets.length) { setLoading(false); return; }
+    if (isRefresh) setRefreshing(true);
+    setFetchError('');
+    try {
+      const { importFromGoogleSheet } = await import('./lib/sheetsApi');
+      const results = [];
+      for (const s of sheets) {
+        try {
+          const tabs = await importFromGoogleSheet(s.url);
+          // Include all non-empty tabs (don't filter by name — user may name tabs anything)
+          tabs.filter(t => t.data.length > 0).forEach(t => results.push(t));
+        } catch (err) {
+          setFetchError(`Could not read sheet: ${err.message}`);
+        }
+      }
+      setAllTabs(results);
+      const now = new Date().toISOString();
+      setLastCacheTime(now);
+      if (results.length > 0) {
+        localStorage.setItem(sheetsCacheKey, JSON.stringify({ tabs: results, timestamp: now }));
+      }
+    } catch (err) {
+      setFetchError(err.message || 'Failed to load sheet data');
+    }
+    finally { setLoading(false); setRefreshing(false); }
+  }, [sheets, sheetsCacheKey]);
+
+  // Background refresh on mount
+  useEffect(() => { fetchSheetData(); }, [fetchSheetData]);
+
+  // Fetch DevRev enhancements for Quality Indicators
+  useEffect(() => {
+    if (!DEVREV_TOKEN) { setEnhLoading(false); return; }
+    (async () => {
+      try {
+        let allParts = [], cursor = null;
+        do {
+          const body = { type: ['enhancement'], custom_fields: { tnt__ancestral_feature: [PS_POS_FEATURE_ID] }, limit: 100 };
+          if (cursor) body.cursor = cursor;
+          const res = await fetch('https://api.devrev.ai/parts.list', {
+            method: 'POST', headers: { 'Authorization': `Bearer ${DEVREV_TOKEN}`, 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+          });
+          if (!res.ok) break;
+          const data = await res.json();
+          allParts = allParts.concat(data.parts || []);
+          cursor = data.next_cursor || null;
+          if (allParts.length >= 500) break;
+        } while (cursor);
+        setEnhancements(allParts);
+      } catch { }
+      finally { setEnhLoading(false); }
+    })();
+  }, []);
+
+  // Build revenue map from "Revenue" tab(s) — only from explicitly named revenue columns
+  const parseRevenue = (raw) => {
+    const s = String(raw || '').trim();
+    if (!s || /^n\/?a$/i.test(s)) return 0;
+    const lines = s.split(/\n/).map(l => l.trim()).filter(Boolean);
+    let best = 0;
+    for (const line of lines) {
+      if (/^n\/?a$/i.test(line.trim())) continue;
+      const cleaned = line.replace(/^.*?(?:NR|Net Revenue)\s*[-–:]\s*/i, '').replace(/~|approx\.?/gi, '').trim();
+      if (!cleaned) continue;
+      const rangeMatch = cleaned.match(/([\d,]+(?:\.\d+)?)\s*[-–to]+\s*([\d,]+(?:\.\d+)?)/);
+      let num;
+      if (rangeMatch) {
+        const a = parseFloat(rangeMatch[1].replace(/,/g, '')) || 0;
+        const b = parseFloat(rangeMatch[2].replace(/,/g, '')) || 0;
+        num = Math.max(a, b);
+      } else {
+        const numMatch = cleaned.match(/([\d,]+(?:\.\d+)?)/);
+        if (!numMatch) continue;
+        num = parseFloat(numMatch[1].replace(/,/g, '')) || 0;
+      }
+      if (/crore|cr\b/i.test(cleaned)) num *= 1e7;
+      else if (/lakh|lac|lacs|lakhs/i.test(cleaned)) num *= 1e5;
+      if (num > best) best = num;
+    }
+    return best;
+  };
+
+  const revenueMap = useMemo(() => {
+    const map = {};
+    const revTabs = allTabs.filter(t => t.name.toLowerCase().includes('revenue'));
+    for (const tab of revTabs) {
+      const hIdx = {};
+      tab.headers.forEach((h, i) => { hIdx[h.toLowerCase().trim()] = i; });
+      const nameIdx = hIdx['project'] ?? hIdx['project name'] ?? hIdx['name'] ?? hIdx['merchant'] ?? 0;
+      const revIdx = hIdx['revenue'] ?? hIdx['amount'] ?? hIdx['value'] ?? hIdx['mrr'] ?? hIdx['arr'] ?? -1;
+      if (revIdx < 0) continue; // no recognized revenue column — skip to avoid summing wrong columns
+      tab.data.forEach(row => {
+        const name = String(row[nameIdx] || '').trim().toLowerCase();
+        if (name) map[name] = (map[name] || 0) + parseRevenue(row[revIdx]);
+      });
+    }
+    return map;
+  }, [allTabs]);
+
+  const projects = useMemo(() => {
+    const all = [];
+    const nonRevTabs = allTabs.filter(t => !t.name.toLowerCase().includes('revenue'));
+    for (const tab of (nonRevTabs.length > 0 ? nonRevTabs : allTabs)) {
+      const hIdx = {};
+      tab.headers.forEach((h, i) => { hIdx[h.toLowerCase().trim()] = i; });
+      const nameIdx = hIdx['project'] ?? hIdx['project name'] ?? hIdx['name'] ?? hIdx['merchant'] ?? 0;
+      const statusIdx = hIdx['status'] ?? hIdx['state'] ?? -1;
+      const revIdx = hIdx['revenue'] ?? hIdx['amount'] ?? hIdx['value'] ?? hIdx['mrr'] ?? -1;
+      const ownerIdx = hIdx['owner'] ?? hIdx['assignee'] ?? hIdx['lead'] ?? -1;
+      const progressIdx = hIdx['progress'] ?? hIdx['completion'] ?? -1;
+      tab.data.forEach(row => {
+        const name = row[nameIdx];
+        if (!name) return;
+        const inlineRev = revIdx >= 0 ? parseRevenue(row[revIdx]) : 0;
+        const sheetRev = revenueMap[String(name).trim().toLowerCase()] || 0;
+        all.push({
+          name, source: tab.name,
+          status: statusIdx >= 0 ? (row[statusIdx] || '') : '',
+          revenue: inlineRev > 0 ? inlineRev : sheetRev,
+          owner: ownerIdx >= 0 ? (row[ownerIdx] || '') : '',
+          progress: progressIdx >= 0 ? (parseInt(String(row[progressIdx] || '0').replace(/[^0-9]/g, '')) || 0) : 0,
+          raw: row, headers: tab.headers,
+        });
+      });
+    }
+    return all;
+  }, [allTabs, revenueMap]);
+
+  // Also calculate total from revenue tab directly if projects have no inline revenue
+  const revTabTotal = useMemo(() => Object.values(revenueMap).reduce((s, v) => s + v, 0), [revenueMap]);
+  const projectRevTotal = projects.reduce((s, p) => s + p.revenue, 0);
+  const totalRevenue = projectRevTotal > 0 ? projectRevTotal : revTabTotal;
+  // Projects with a non-empty status — use as denominator for percentages
+  const knownProjects = projects.filter(p => p.status.trim() !== '');
+
+  // Use keyword-based matching to handle verbose/freeform status values
+  const isProjectCompleted = (s) => {
+    const l = s.toLowerCase();
+    return l.includes('went live') || l.includes('gone live') || l.includes('already live') ||
+           ['completed', 'done', 'delivered', 'live'].includes(l);
+  };
+  const isProjectActive = (s) => {
+    const l = s.toLowerCase();
+    if (isProjectCompleted(s)) return false;
+    return ['on track', 'in progress', 'development', 'wip', 'qa', 'uat',
+            'under testing', 'testing', 'frontend dev', 'active'].some(k => l.includes(k));
+  };
+  const isProjectAtRisk = (s) => {
+    const l = s.toLowerCase();
+    return ['blocked', 'delayed', 'at risk', 'following up'].some(k => l.includes(k));
+  };
+
+  const activeProjects    = knownProjects.filter(p => isProjectActive(p.status)).length;
+  const completedProjects = knownProjects.filter(p => isProjectCompleted(p.status)).length;
+  const atRiskProjects    = knownProjects.filter(p => isProjectAtRisk(p.status)).length;
+
+  const formatCurrency = (n) => {
+    if (!n || n <= 0) return '—';
+    if (n >= 1e7)  return `₹${Math.round(n / 1e7)}Cr`;
+    if (n >= 1e5)  return `₹${Math.round(n / 1e5)}L`;
+    return `₹${n.toLocaleString('en-IN')}`;
+  };
+
+  const statusColor = (s) => {
+    const l = (s || '').toLowerCase();
+    // "Went Live" and variants = delivered (grey-green)
+    if (l.includes('went live') || l.includes('already live') || l.includes('gone live')) return { bg: '#d1fae5', color: '#059669', label: s };
+    if (['active', 'on track', 'live'].includes(l) || l.includes('on track')) return { bg: '#d1fae5', color: '#059669', label: s };
+    if (l.includes('in progress') || l.includes('wip') || l.includes('development') || l.includes('uat') || l.includes('qa') || l.includes('testing')) return { bg: '#dbeafe', color: '#2563eb', label: s };
+    if (l.includes('blocked') || l.includes('delayed') || l.includes('at risk') || l.includes('following up')) return { bg: '#fef2f2', color: '#dc2626', label: s };
+    if (['completed', 'done', 'delivered'].includes(l)) return { bg: '#d1fae5', color: '#059669', label: s };
+    if (l.includes('not yet started') || l.includes('not started') || l.includes('planned') || l.includes('upcoming')) return { bg: '#ede9fe', color: '#7c3aed', label: s };
+    if (l.includes('discussion') || l.includes('feedback')) return { bg: '#fef3c7', color: '#d97706', label: s };
+    return { bg: '#f3f4f6', color: '#6b7280', label: s };
+  };
+
+  const statCard = (icon, label, value, color) => (
+    <div style={{ padding: '1rem', borderRadius: '12px', background: 'var(--bg-card)', border: '1px solid var(--border-color)', textAlign: 'center' }}>
+      <div style={{ width: 36, height: 36, borderRadius: '10px', background: color + '18', display: 'flex', alignItems: 'center', justifyContent: 'center', margin: '0 auto 0.5rem', color }}>
+        {icon}
+      </div>
+      <div style={{ fontSize: '0.65rem', color: 'var(--text-muted)', marginBottom: '0.2rem' }}>{label}</div>
+      <div style={{ fontSize: '1.4rem', fontWeight: 700, color: 'var(--text-primary)' }}>{value}</div>
+    </div>
+  );
+
+  if (loading) return (
+    <div className="dashboard-container" style={{ padding: '1.5rem' }}>
+      <div className="loading-state"><Loader2 size={32} className="spin" /><p>Loading project data...</p></div>
+    </div>
+  );
+
+  return (
+    <div className="dashboard-container" style={{ padding: '1.5rem' }}>
+      <h2 style={{ fontSize: '1.25rem', fontWeight: 600, marginBottom: '0.25rem' }}>Project Quality & Impact Metrics</h2>
+      <p style={{ fontSize: '0.85rem', color: 'var(--text-muted)', marginBottom: '1.25rem' }}>Monitor project quality, deliverable impact, and overall project health.</p>
+
+      {fetchError && (
+        <div style={{ background: '#fef2f2', border: '1px solid #fca5a5', borderRadius: '8px', padding: '0.75rem 1rem', marginBottom: '1rem', display: 'flex', gap: '0.5rem', alignItems: 'flex-start' }}>
+          <AlertCircle size={16} style={{ color: '#dc2626', flexShrink: 0, marginTop: '0.1rem' }} />
+          <div>
+            <div style={{ fontSize: '0.8rem', fontWeight: 600, color: '#dc2626' }}>Sheet load error</div>
+            <div style={{ fontSize: '0.75rem', color: '#7f1d1d', marginTop: '0.2rem' }}>{fetchError}</div>
+          </div>
+        </div>
+      )}
+      {projects.length === 0 ? (
+        <div style={{ textAlign: 'center', padding: '2rem', color: 'var(--text-muted)' }}>
+          <Briefcase size={28} style={{ marginBottom: '0.5rem', opacity: 0.5 }} />
+          <p style={{ fontSize: '0.85rem' }}>
+            {sheets.length === 0
+              ? 'No sheet linked. Use "Add Sheet" from the Dashboard to link a Google Sheet.'
+              : allTabs.length === 0
+                ? 'Sheet was read but contains no data. Make sure the sheet has at least one tab with rows.'
+                : 'No project rows found. Ensure a column is named "Project", "Name", or "Merchant".'}
+          </p>
+          {allTabs.length > 0 && (
+            <p style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '0.25rem' }}>
+              Tabs found: {allTabs.map(t => `"${t.name}"`).join(', ')}
+            </p>
+          )}
+        </div>
+      ) : (
+        <>
+          {/* Stats Cards */}
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '0.75rem', marginBottom: '1.25rem' }}>
+            {statCard(<CheckCircle size={18} />, 'Total Merchants', projects.length, '#059669')}
+            {statCard(<Briefcase size={18} />, 'Active', activeProjects, '#2563eb')}
+            {statCard(<AlertCircle size={18} />, 'At Risk', atRiskProjects || 'Low', '#dc2626')}
+            {statCard(<PieChart size={18} />, 'Revenue', formatCurrency(totalRevenue), '#7c3aed')}
+          </div>
+
+          {/* Quality Indicators + Project Progress */}
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.75rem', marginBottom: '1.25rem' }}>
+            {/* Quality Indicators — from DevRev enhancements */}
+            <div style={{ background: 'var(--bg-card)', borderRadius: '12px', border: '1px solid var(--border-color)', padding: '1rem' }}>
+              <h3 style={{ fontSize: '0.85rem', fontWeight: 600, marginBottom: '1rem', color: 'var(--text-primary)' }}>Quality Indicators</h3>
+              {enhLoading ? (
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', color: 'var(--text-muted)', fontSize: '0.8rem' }}>
+                  <Loader2 size={14} className="spin" /> Loading enhancements...
+                </div>
+              ) : enhancements.length === 0 ? (
+                <p style={{ fontSize: '0.78rem', color: 'var(--text-muted)' }}>No PS-POS enhancements found.</p>
+              ) : (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '0.6rem' }}>
+                  {(() => {
+                    const statusMap = {};
+                    enhancements.forEach(e => {
+                      const s = (e.custom_fields?.tnt__status || '').replace(/[⚫🟢🟡🔴⚪🟠🔵]/g, '').trim() || 'Unknown';
+                      statusMap[s] = (statusMap[s] || 0) + 1;
+                    });
+                    return Object.entries(statusMap).sort(([,a],[,b]) => b - a).map(([status, count], i) => {
+                      const pct = Math.round((count / enhancements.length) * 100);
+                      return (
+                        <div key={status}>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '0.2rem' }}>
+                            <span style={{ fontSize: '0.72rem', color: 'var(--text-primary)' }}>{status}</span>
+                            <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>{pct}%</span>
+                          </div>
+                          <div style={{ height: 6, borderRadius: 3, background: 'var(--bg-hover)', overflow: 'hidden' }}>
+                            <div style={{ height: '100%', borderRadius: 3, width: `${pct}%`, background: ['#059669', '#2563eb', '#d97706', '#7c3aed', '#ef4444'][i % 5] }} />
+                          </div>
+                        </div>
+                      );
+                    });
+                  })()}
+                  <p style={{ fontSize: '0.65rem', color: 'var(--text-muted)', marginTop: '0.3rem' }}>{enhancements.length} enhancements from DevRev (PS-POS)</p>
+                </div>
+              )}
+            </div>
+
+            {/* Projects by Category (falls back to count when no per-project revenue) */}
+            <div style={{ background: 'var(--bg-card)', borderRadius: '12px', border: '1px solid var(--border-color)', padding: '1rem' }}>
+              <h3 style={{ fontSize: '0.85rem', fontWeight: 600, marginBottom: '1rem', color: 'var(--text-primary)' }}>Projects by Category</h3>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '0.6rem' }}>
+                {(() => {
+                  // Build per-source stats: count + revenue
+                  const srcMap = {};
+                  projects.forEach(p => {
+                    const s = p.source || 'Other';
+                    if (!srcMap[s]) srcMap[s] = { count: 0, revenue: 0 };
+                    srcMap[s].count++;
+                    srcMap[s].revenue += p.revenue;
+                  });
+                  const hasRevenue = Object.values(srcMap).some(v => v.revenue > 0);
+                  const sorted = Object.entries(srcMap).sort(([,a],[,b]) =>
+                    hasRevenue ? b.revenue - a.revenue : b.count - a.count
+                  );
+                  const maxVal = Math.max(...sorted.map(([,v]) => hasRevenue ? v.revenue : v.count));
+                  return sorted.map(([src, val], i) => {
+                    const displayVal = hasRevenue ? val.revenue : val.count;
+                    const pct = maxVal > 0 ? Math.round((displayVal / maxVal) * 100) : 0;
+                    return (
+                      <div key={src}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '0.2rem' }}>
+                          <span style={{ fontSize: '0.72rem', color: 'var(--text-primary)' }}>{src}</span>
+                          <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>
+                            {hasRevenue ? formatCurrency(val.revenue) : `${val.count} projects`}
+                          </span>
+                        </div>
+                        <div style={{ height: 6, borderRadius: 3, background: 'var(--bg-hover)', overflow: 'hidden' }}>
+                          <div style={{ height: '100%', borderRadius: 3, width: `${pct}%`, background: ['#4f46e5', '#059669', '#d97706', '#0ea5e9', '#7c3aed'][i % 5] }} />
+                        </div>
+                      </div>
+                    );
+                  });
+                })()}
+              </div>
+            </div>
+          </div>
+
+          {/* Active Projects Status */}
+          <div style={{ background: 'var(--bg-card)', borderRadius: '12px', border: '1px solid var(--border-color)', padding: '1rem', marginBottom: '1.25rem' }}>
+            <h3 style={{ fontSize: '0.85rem', fontWeight: 600, marginBottom: '0.75rem', color: 'var(--text-primary)' }}>Active Projects Status</h3>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(240px, 1fr))', gap: '0.75rem' }}>
+              {/* Show projects that have a known status first */}
+              {[...knownProjects, ...projects.filter(p => !p.status.trim())].slice(0, 9).map((p, i) => {
+                const sc = statusColor(p.status);
+                // Derive progress from status when no explicit progress column exists
+                const statusProgress = (() => {
+                  const s = (p.status || '').toLowerCase();
+                  if (['done', 'completed', 'delivered', 'went live', 'live'].some(k => s.includes(k))) return 100;
+                  if (['on track'].some(k => s.includes(k))) return 70;
+                  if (['qa', 'under testing', 'testing'].some(k => s.includes(k))) return 75;
+                  if (['development', 'in progress', 'wip', 'frontend dev'].some(k => s.includes(k))) return 50;
+                  if (['needs discussion', 'under discussion'].some(k => s.includes(k))) return 20;
+                  if (['blocked', 'delayed', 'at risk'].some(k => s.includes(k))) return 30;
+                  if (['not yet started', 'not started', 'upcoming', 'planned'].some(k => s.includes(k))) return 5;
+                  return 10;
+                })();
+                const prog = p.progress || statusProgress;
+                return (
+                  <div key={i} style={{ padding: '0.75rem', borderRadius: '10px', background: 'var(--bg-hover)', border: '1px solid var(--border-color)' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.4rem' }}>
+                      <span style={{ fontSize: '0.82rem', fontWeight: 600, color: 'var(--text-primary)' }}>{p.name}</span>
+                      <span style={{ fontSize: '0.6rem', fontWeight: 600, padding: '0.12rem 0.4rem', borderRadius: '4px', background: sc.bg, color: sc.color }}>{sc.label || 'Active'}</span>
+                    </div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.3rem' }}>
+                      <div style={{ flex: 1, height: 6, borderRadius: 3, background: 'var(--border-color)', overflow: 'hidden' }}>
+                        <div style={{ height: '100%', borderRadius: 3, width: `${prog}%`, background: sc.color }} />
+                      </div>
+                      <span style={{ fontSize: '0.7rem', fontWeight: 600, color: 'var(--text-muted)' }}>{prog}%</span>
+                    </div>
+                    <div style={{ fontSize: '0.65rem', color: 'var(--text-muted)' }}>
+                      {p.owner && <span>{p.owner} · </span>}
+                      {p.revenue > 0 && <span>{formatCurrency(p.revenue)} · </span>}
+                      <span>{p.source}</span>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+            {projects.length > 9 && (
+              <p style={{ fontSize: '0.7rem', color: 'var(--text-muted)', marginTop: '0.5rem' }}>+ {projects.length - 9} more projects</p>
+            )}
+          </div>
+
+          {/* Business Impact + Quality Actions */}
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.75rem' }}>
+            <div style={{ background: 'var(--bg-card)', borderRadius: '12px', border: '1px solid var(--border-color)', padding: '1rem' }}>
+              <h3 style={{ fontSize: '0.85rem', fontWeight: 600, marginBottom: '0.75rem', color: 'var(--text-primary)' }}>Business Impact</h3>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+                <div style={{ padding: '0.6rem 0.75rem', borderRadius: '8px', background: 'linear-gradient(135deg, #059669, #10b981)' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', marginBottom: '0.15rem' }}>
+                    <CheckCircle size={14} color="#4ade80" />
+                    <span style={{ fontSize: '0.8rem', fontWeight: 600, color: '#fff' }}>Total Revenue {formatCurrency(totalRevenue)}</span>
+                  </div>
+                  <p style={{ fontSize: '0.72rem', color: 'rgba(255,255,255,0.7)', margin: 0 }}>Across {projects.length} projects from {allTabs.length} data sources</p>
+                </div>
+                <div style={{ padding: '0.6rem 0.75rem', borderRadius: '8px', background: 'linear-gradient(135deg, #2563eb, #3b82f6)' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', marginBottom: '0.15rem' }}>
+                    <CheckCircle size={14} color="#93c5fd" />
+                    <span style={{ fontSize: '0.8rem', fontWeight: 600, color: '#fff' }}>Delivery Rate {knownProjects.length > 0 ? Math.round((completedProjects / knownProjects.length) * 100) : 0}%</span>
+                  </div>
+                  <p style={{ fontSize: '0.72rem', color: 'rgba(255,255,255,0.7)', margin: 0 }}>{completedProjects} delivered out of {knownProjects.length} tracked projects</p>
+                </div>
+              </div>
+            </div>
+
+            <div style={{ background: 'var(--bg-card)', borderRadius: '12px', border: '1px solid var(--border-color)', padding: '1rem' }}>
+              <h3 style={{ fontSize: '0.85rem', fontWeight: 600, marginBottom: '0.75rem', color: 'var(--text-primary)' }}>Quality Actions</h3>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+                <div style={{ padding: '0.6rem 0.75rem', borderRadius: '8px', background: 'linear-gradient(135deg, #d97706, #f59e0b)' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', marginBottom: '0.15rem' }}>
+                    <AlertCircle size={14} color="#fde68a" />
+                    <span style={{ fontSize: '0.8rem', fontWeight: 600, color: '#fff' }}>Review At-Risk Projects</span>
+                  </div>
+                  <p style={{ fontSize: '0.72rem', color: 'rgba(255,255,255,0.7)', margin: 0 }}>
+                    {atRiskProjects > 0 ? `${atRiskProjects} project(s) need attention` : 'All projects on track'}
+                  </p>
+                </div>
+                <div style={{ padding: '0.6rem 0.75rem', borderRadius: '8px', background: 'linear-gradient(135deg, #7c3aed, #8b5cf6)' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', marginBottom: '0.15rem' }}>
+                    <ShieldCheck size={14} color="#c4b5fd" />
+                    <span style={{ fontSize: '0.8rem', fontWeight: 600, color: '#fff' }}>Performance Review</span>
+                  </div>
+                  <p style={{ fontSize: '0.72rem', color: 'rgba(255,255,255,0.7)', margin: 0 }}>Schedule quarterly project health assessment</p>
+                </div>
+              </div>
+            </div>
+          </div>
+        </>
+      )}
+
+      {/* Refresh + Cache Info */}
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '0.75rem' }}>
+        <span style={{ fontSize: '0.7rem', color: 'var(--text-muted)' }}>
+          {lastCacheTime ? `Last updated: ${format(new Date(lastCacheTime), 'MMM d, h:mm a')}` : ''}
+          {refreshing && ' — Refreshing...'}
+        </span>
+        <button
+          onClick={() => fetchSheetData(true)}
+          disabled={refreshing}
+          style={{
+            display: 'flex', alignItems: 'center', gap: '0.4rem',
+            padding: '0.4rem 0.75rem', borderRadius: '6px',
+            border: '1px solid var(--border-color)', background: 'var(--bg-hover)',
+            color: 'var(--accent-primary)', fontSize: '0.75rem', fontWeight: 600, cursor: 'pointer',
+          }}
+        >
+          {refreshing ? <Loader2 size={12} className="spin" /> : <RefreshCw size={12} />} Refresh Data
+        </button>
+      </div>
+    </div>
+  );
+};
+
+// ─── PS TEAM HEALTH & ENGAGEMENT ──────────────────────────────────
+const PSTeamHealth = ({ teamConfig = PS_POS_TEAM_CONFIG, departmentId = null }) => {
+  const slackCacheKey = `ps_slack_cache_${teamConfig.cacheKeySuffix}`;
+  const [tickets, setTickets] = useState([]);
+  const [slackMsgs, setSlackMsgs] = useState([]);
+  const [slackEngagement, setSlackEngagement] = useState({});
+  // Dept member list — used to filter out cross-team members from other boards
+  const [deptMemberFilter, setDeptMemberFilter] = useState(null); // null = not loaded yet
+  const [ticketsLoading, setTicketsLoading] = useState(true);
+  const [slackLoading, setSlackLoading] = useState(true);
+  const [slackRefreshing, setSlackRefreshing] = useState(false);
+  const [lastCacheTime, setLastCacheTime] = useState(null);
+
+  // Load from cache on mount (expires after 3 days)
+  useEffect(() => {
+    try {
+      const cached = JSON.parse(localStorage.getItem(slackCacheKey));
+      if (cached && cached.msgs && cached.engagement && cached.timestamp) {
+        const age = Date.now() - new Date(cached.timestamp).getTime();
+        const threeDays = 3 * 24 * 60 * 60 * 1000;
+        if (age < threeDays) {
+          setSlackMsgs(cached.msgs);
+          setSlackEngagement(cached.engagement);
+          setLastCacheTime(cached.timestamp);
+          setSlackLoading(false);
+        }
+      }
+    } catch { }
+  }, [slackCacheKey]);
+
+  // Load dept member list so we can filter out cross-team members
+  useEffect(() => {
+    if (!departmentId) return;
+    (async () => {
+      try {
+        const { getDepartmentMembers } = await import('./lib/sheetsApi');
+        const members = await getDepartmentMembers(departmentId);
+        // members: [{ member_name, email, team_id }]
+        const emails = new Set(members.map(m => (m.email || '').toLowerCase()).filter(Boolean));
+        const names  = new Set(members.map(m => (m.member_name || '').toLowerCase()).filter(Boolean));
+        setDeptMemberFilter({ emails, names });
+      } catch {
+        setDeptMemberFilter({ emails: new Set(), names: new Set() }); // on error show all
+      }
+    })();
+  }, [departmentId]);
+
+  useEffect(() => {
+    if (!DEVREV_TOKEN) { setTicketsLoading(false); return; }
+    (async () => {
+      try {
+        let allWorks = [], cursor = null;
+        do {
+          const params = buildDevRevParams(teamConfig, cursor);
+          const res = await fetch(`https://api.devrev.ai/works.list?${params}`, { headers: { 'Authorization': `Bearer ${DEVREV_TOKEN}` } });
+          if (!res.ok) break;
+          const data = await res.json();
+          allWorks = allWorks.concat(data.works || []);
+          cursor = data.next_cursor || null;
+          if (allWorks.length >= 500) break;
+        } while (cursor);
+        setTickets(allWorks);
+      } catch { }
+      finally { setTicketsLoading(false); }
+    })();
+  }, [teamConfig]);
+
+  const fetchSlackData = useCallback(async (isRefresh = false) => {
+    const channelIds = teamConfig.slackChannelIds;
+    if (!SLACK_BOT_TOKEN || channelIds.length === 0) { setSlackLoading(false); return; }
+    if (isRefresh) setSlackRefreshing(true);
+    try {
+      const subteamId = teamConfig.slackSubteamId;
+      const searchHandle = teamConfig.slackHandle;
+      const mentionsHandle = (text) => {
+        if (!text) return false;
+        if (subteamId && text.includes(`<!subteam^${subteamId}>`)) return true;
+        return text.includes(searchHandle);
+      };
+      const oldest = String(Math.floor(Date.now() / 1000) - 15 * 24 * 3600);
+      const allMatches = [];
+      const engagement = {};
+      const threadStarters = {};
+      for (const chId of channelIds) {
+        try {
+          const data = await slackGet('conversations.history', { channel: chId, oldest, limit: '50' });
+          const allMsgs = (data.messages || []);
+          allMsgs
+            .filter(m => mentionsHandle(m.text) && m.type === 'message' && !m.subtype)
+            .forEach(m => allMatches.push({ ...m, _channelId: chId }));
+
+          // Track thread starters
+          allMsgs.filter(m => m.type === 'message' && !m.subtype && m.user).forEach(m => {
+            if (!threadStarters[m.user]) threadStarters[m.user] = 0;
+            threadStarters[m.user]++;
+          });
+
+          const threaded = allMsgs.filter(m => (m.reply_count || 0) > 0).slice(0, 5);
+          for (const parent of threaded) {
+            try {
+              const rd = await slackGet('conversations.replies', { channel: chId, ts: parent.ts, limit: '100' });
+              const replies = (rd.messages || []).slice(1);
+              replies
+                .filter(m => mentionsHandle(m.text))
+                .forEach(m => allMatches.push({ ...m, _channelId: chId, _parentTs: parent.ts }));
+              const threadHasMention = mentionsHandle(parent.text) || replies.some(r => mentionsHandle(r.text));
+              if (threadHasMention) {
+                replies.forEach(reply => {
+                  const user = reply.user || 'unknown';
+                  if (!engagement[user]) engagement[user] = { replies: 0, threads: 0, avgResponseTime: 0, responseTimes: [], started: 0 };
+                  engagement[user].replies++;
+                  if (!engagement[user]._threads) engagement[user]._threads = new Set();
+                  engagement[user]._threads.add(parent.ts);
+                  const responseTime = (parseFloat(reply.ts) - parseFloat(parent.ts)) / 60;
+                  engagement[user].responseTimes.push(responseTime);
+                });
+              }
+            } catch { }
+          }
+        } catch { }
+      }
+      // Merge thread starters into engagement
+      Object.entries(threadStarters).forEach(([uid, count]) => {
+        if (!engagement[uid]) engagement[uid] = { replies: 0, threads: 0, avgResponseTime: 0, responseTimes: [], started: 0 };
+        engagement[uid].started = count;
+      });
+      const userIds = Object.keys(engagement);
+      const nameMap = {};
+      for (const uid of userIds) {
+        try {
+          const udata = await slackGet('users.info', { user: uid });
+          nameMap[uid] = udata.user?.real_name || udata.user?.name || uid;
+        } catch { nameMap[uid] = uid; }
+      }
+      const namedEngagement = {};
+      Object.entries(engagement).forEach(([uid, e]) => {
+        const name = nameMap[uid] || uid;
+        e.threads = e._threads ? e._threads.size : 0;
+        e.avgResponseTime = e.responseTimes.length > 0 ? Math.round(e.responseTimes.reduce((a, b) => a + b, 0) / e.responseTimes.length) : 0;
+        delete e._threads;
+        delete e.responseTimes;
+        namedEngagement[name] = e;
+      });
+      setSlackMsgs(allMatches);
+      setSlackEngagement(namedEngagement);
+      const now = new Date().toISOString();
+      setLastCacheTime(now);
+      localStorage.setItem(slackCacheKey, JSON.stringify({ msgs: allMatches, engagement: namedEngagement, timestamp: now }));
+    } catch { }
+    finally { setSlackLoading(false); setSlackRefreshing(false); }
+  }, [teamConfig, slackCacheKey]);
+
+  // Background refresh on mount (if cache exists, data is already shown)
+  useEffect(() => { fetchSlackData(); }, [fetchSlackData]);
+
+  const memberWorkload = useMemo(() => {
+    const map = {};
+    tickets.forEach(t => {
+      (t.owned_by || []).forEach(o => {
+        if (o.display_name === 'Unassigned' || o.type === 'service_account') return;
+        const name = o.display_name || o.full_name || 'Unknown';
+        const email = o.email || '';
+        if (!map[name]) map[name] = { name, email, active: 0, total: 0 };
+        map[name].total++;
+        if (!['completed', 'done', 'wont_fix', 'archived'].includes(t.stage?.name?.toLowerCase())) map[name].active++;
+      });
+    });
+    return Object.values(map).sort((a, b) => b.active - a.active);
+  }, [tickets]);
+
+  // Filter to only this department's members — prevents cross-team ticket assignees
+  // (e.g. a PS-POS member who helped on one PS-Enterprise ticket) from appearing
+  const filteredMemberWorkload = useMemo(() => {
+    const excluded = new Set((teamConfig.excludeMembers || []).map(n => n.toLowerCase()));
+    let result = memberWorkload;
+    // Apply hard-coded exclusion list from team config
+    if (excluded.size > 0) {
+      result = result.filter(m => !excluded.has((m.name || '').toLowerCase()));
+    }
+    // Apply dynamic dept member filter if loaded and non-empty
+    if (deptMemberFilter && (deptMemberFilter.emails.size > 0 || deptMemberFilter.names.size > 0)) {
+      result = result.filter(m =>
+        deptMemberFilter.emails.has((m.email || '').toLowerCase()) ||
+        deptMemberFilter.names.has((m.name || '').toLowerCase())
+      );
+    }
+    return result;
+  }, [memberWorkload, deptMemberFilter, teamConfig]);
+
+  const maxWorkload = filteredMemberWorkload.length > 0 ? Math.max(...filteredMemberWorkload.map(m => m.total)) : 1;
+  const avgWorkload = filteredMemberWorkload.length > 0 ? (filteredMemberWorkload.reduce((s, m) => s + m.active, 0) / filteredMemberWorkload.length).toFixed(1) : 0;
+  const totalSlackMentions = slackMsgs.length;
+  const attendance = filteredMemberWorkload.length > 0 ? Math.round((filteredMemberWorkload.filter(m => m.active > 0).length / filteredMemberWorkload.length) * 100) : 0;
+
+  const getHealthStatus = (m) => {
+    const ratio = m.active / maxWorkload;
+    if (ratio > 0.7) return { label: 'Heavy Workload', color: '#d97706', bg: '#fef3c7' };
+    if (ratio > 0.3) return { label: 'Good', color: '#059669', bg: '#d1fae5' };
+    if (m.active === 0) return { label: 'Idle', color: '#6b7280', bg: '#f3f4f6' };
+    return { label: 'Light', color: '#2563eb', bg: '#dbeafe' };
+  };
+
+  const statCard = (icon, label, value, color) => (
+    <div style={{ padding: '1rem', borderRadius: '12px', background: 'var(--bg-card)', border: '1px solid var(--border-color)', textAlign: 'center' }}>
+      <div style={{ width: 36, height: 36, borderRadius: '10px', background: color + '18', display: 'flex', alignItems: 'center', justifyContent: 'center', margin: '0 auto 0.5rem', color }}>
+        {icon}
+      </div>
+      <div style={{ fontSize: '0.65rem', color: 'var(--text-muted)', marginBottom: '0.2rem' }}>{label}</div>
+      <div style={{ fontSize: '1.4rem', fontWeight: 700, color: 'var(--text-primary)' }}>{value}</div>
+    </div>
+  );
+
+  if (ticketsLoading && slackLoading) return (
+    <div className="dashboard-container" style={{ padding: '1.5rem' }}>
+      <div className="loading-state"><Loader2 size={32} className="spin" /><p>Loading team health data...</p></div>
+    </div>
+  );
+
+  return (
+    <div className="dashboard-container" style={{ padding: '1.5rem' }}>
+      <h2 style={{ fontSize: '1.25rem', fontWeight: 600, marginBottom: '0.25rem' }}>Team Health & Engagement Metrics</h2>
+      <p style={{ fontSize: '0.85rem', color: 'var(--text-muted)', marginBottom: '1.25rem' }}>Monitor team wellbeing, collaboration, and engagement levels across your organization.</p>
+
+      {/* Stats Cards */}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '0.75rem', marginBottom: '1.25rem' }}>
+        {statCard(<CheckCircle size={18} />, 'Team Mood', `${Math.min(10, (attendance / 10)).toFixed(1)}/10`, '#059669')}
+        {statCard(<Users size={18} />, 'Active', `${attendance}%`, '#2563eb')}
+        {statCard(<MessageSquare size={18} />, 'Slack Mentions', totalSlackMentions, '#7c3aed')}
+        {statCard(<Briefcase size={18} />, 'Avg Workload', avgWorkload, '#d97706')}
+      </div>
+
+      {/* Engagement Trends + Wellbeing Indicators */}
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.75rem', marginBottom: '1.25rem' }}>
+        {/* Engagement Trends */}
+        <div style={{ background: 'var(--bg-card)', borderRadius: '12px', border: '1px solid var(--border-color)', padding: '1rem' }}>
+          <h3 style={{ fontSize: '0.85rem', fontWeight: 600, marginBottom: '1rem', color: 'var(--text-primary)' }}>Engagement Trends</h3>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+            {filteredMemberWorkload.map((m, i) => {
+              const slackData = Object.entries(slackEngagement).find(([name]) => name.toLowerCase() === m.name.toLowerCase());
+              const slackReplies = slackData ? slackData[1].replies : 0;
+              const totalEngagement = m.total + slackReplies;
+              const maxEng = Math.max(...filteredMemberWorkload.map(w => {
+                const sr = Object.entries(slackEngagement).find(([n]) => n.toLowerCase() === w.name.toLowerCase());
+                return w.total + (sr ? sr[1].replies : 0);
+              }));
+              return (
+                <div key={i} style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                  <span style={{ fontSize: '0.72rem', color: 'var(--text-primary)', minWidth: '100px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{m.name}</span>
+                  <div style={{ flex: 1, height: 8, borderRadius: 4, background: 'var(--bg-hover)', overflow: 'hidden', display: 'flex' }}>
+                    <div style={{ height: '100%', width: `${(m.total / maxEng) * 100}%`, background: ['#059669', '#2563eb', '#d97706', '#7c3aed', '#0ea5e9'][i % 5] }} />
+                    {slackReplies > 0 && <div style={{ height: '100%', width: `${(slackReplies / maxEng) * 100}%`, background: ['#059669', '#2563eb', '#d97706', '#7c3aed', '#0ea5e9'][i % 5], opacity: 0.4 }} />}
+                  </div>
+                  <span style={{ fontSize: '0.65rem', color: 'var(--text-muted)', minWidth: '55px', textAlign: 'right' }}>{m.total}t · {slackReplies}s</span>
+                </div>
+              );
+            })}
+            <div style={{ display: 'flex', gap: '1rem', fontSize: '0.6rem', color: 'var(--text-muted)', marginTop: '0.25rem' }}>
+              <span>■ tickets (solid)</span> <span style={{ opacity: 0.4 }}>■</span><span> slack replies (light)</span>
+            </div>
+          </div>
+        </div>
+
+        {/* Wellbeing Indicators — Slack thread engagement */}
+        <div style={{ background: 'var(--bg-card)', borderRadius: '12px', border: '1px solid var(--border-color)', padding: '1rem' }}>
+          <h3 style={{ fontSize: '0.85rem', fontWeight: 600, marginBottom: '1rem', color: 'var(--text-primary)' }}>Wellbeing Indicators</h3>
+          {slackLoading ? (
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', color: 'var(--text-muted)', fontSize: '0.8rem' }}>
+              <Loader2 size={14} className="spin" /> Scanning Slack threads...
+            </div>
+          ) : Object.keys(slackEngagement).length === 0 ? (
+            <p style={{ fontSize: '0.78rem', color: 'var(--text-muted)' }}>No thread replies found in the last 15 days.</p>
+          ) : (() => {
+            const teamNames = filteredMemberWorkload.map(m => m.name.toLowerCase());
+            console.log('[Wellbeing] DevRev names:', teamNames, 'Slack names:', Object.keys(slackEngagement));
+            const isTeamMember = (name) => {
+              const n = name.toLowerCase();
+              return teamNames.some(tn => {
+                if (tn === n) return true;
+                // Only match on words that are at least 3 chars — prevents single initials
+                // like "M" from matching any name containing the letter 'm'
+                const nWords = new Set(n.split(' ').filter(w => w.length >= 3));
+                const tnWords = tn.split(' ').filter(w => w.length >= 3);
+                return tnWords.some(w => nWords.has(w));
+              });
+            };
+            const teamEntries = Object.entries(slackEngagement)
+              .filter(([name]) => {
+                if (name.toLowerCase() === 'slackbot' || name === 'unknown') return false;
+                return isTeamMember(name);
+              })
+              .sort(([,a],[,b]) => (b.replies + (b.started || 0)) - (a.replies + (a.started || 0)));
+            if (teamEntries.length === 0) return <p style={{ fontSize: '0.78rem', color: 'var(--text-muted)' }}>No {teamConfig.label} member activity found.</p>;
+            const maxActivity = Math.max(...teamEntries.map(([,e]) => e.replies + (e.started || 0)));
+            return (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '0.6rem' }}>
+                {teamEntries.map(([name, data], i) => {
+                  const engagementPct = Math.round(((data.replies + (data.started || 0)) / maxActivity) * 100);
+                  return (
+                    <div key={name}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '0.2rem' }}>
+                        <span style={{ fontSize: '0.72rem', color: 'var(--text-primary)' }}>{name}</span>
+                        <span style={{ fontSize: '0.65rem', color: 'var(--text-muted)' }}>
+                          {data.started > 0 ? `${data.started} started · ` : ''}{data.replies} replies · {data.threads} threads · ~{data.avgResponseTime}m avg
+                        </span>
+                      </div>
+                      <div style={{ height: 6, borderRadius: 3, background: 'var(--bg-hover)', overflow: 'hidden' }}>
+                        <div style={{ height: '100%', borderRadius: 3, width: `${engagementPct}%`, background: ['#059669', '#2563eb', '#d97706', '#7c3aed', '#ef4444'][i % 5] }} />
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            );
+          })()}
+        </div>
+      </div>
+
+      {/* Team Member Status */}
+      <div style={{ background: 'var(--bg-card)', borderRadius: '12px', border: '1px solid var(--border-color)', padding: '1rem' }}>
+        <h3 style={{ fontSize: '0.85rem', fontWeight: 600, marginBottom: '0.75rem', color: 'var(--text-primary)' }}>Team Member Status</h3>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))', gap: '0.75rem' }}>
+          {filteredMemberWorkload.map((m, i) => {
+            const health = getHealthStatus(m);
+            return (
+              <div key={i} style={{ padding: '0.75rem', borderRadius: '10px', background: 'var(--bg-hover)', border: '1px solid var(--border-color)' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.4rem' }}>
+                  <div style={{
+                    width: 32, height: 32, borderRadius: '50%',
+                    background: ['#4f46e5', '#059669', '#d97706', '#0ea5e9', '#7c3aed'][i % 5],
+                    color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center',
+                    fontSize: '0.75rem', fontWeight: 700,
+                  }}>
+                    {m.name.split(' ').map(n => n[0]).join('').substring(0, 2)}
+                  </div>
+                  <div style={{ flex: 1 }}>
+                    <div style={{ fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-primary)' }}>{m.name}</div>
+                    <span style={{ fontSize: '0.65rem', fontWeight: 600, padding: '0.1rem 0.35rem', borderRadius: '4px', background: health.bg, color: health.color }}>{health.label}</span>
+                  </div>
+                </div>
+                <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)' }}>
+                  {m.active} active · {m.total} total tickets
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* Recent Insights + Recommended Actions */}
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.75rem' }}>
+        {/* Recent Insights */}
+        <div style={{ background: 'var(--bg-card)', borderRadius: '12px', border: '1px solid var(--border-color)', padding: '1rem' }}>
+          <h3 style={{ fontSize: '0.85rem', fontWeight: 600, marginBottom: '0.75rem', color: 'var(--text-primary)' }}>Recent Insights</h3>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+            <div style={{ padding: '0.6rem 0.75rem', borderRadius: '8px', background: 'linear-gradient(135deg, #059669, #10b981)', border: '1px solid #05966930' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', marginBottom: '0.15rem' }}>
+                <CheckCircle size={14} color="#4ade80" />
+                <span style={{ fontSize: '0.8rem', fontWeight: 600, color: '#fff' }}>
+                  Collaboration {totalSlackMentions > 5 ? 'Up' : 'Steady'} {totalSlackMentions > 0 ? `${totalSlackMentions} threads` : ''}
+                </span>
+              </div>
+              <p style={{ fontSize: '0.72rem', color: 'rgba(255,255,255,0.7)', margin: 0 }}>
+                {totalSlackMentions > 5 ? 'Cross-team communication has significantly improved.' : 'Team communication is steady this sprint.'}
+              </p>
+            </div>
+            <div style={{ padding: '0.6rem 0.75rem', borderRadius: '8px', background: 'linear-gradient(135deg, #2563eb, #3b82f6)', border: '1px solid #2563eb30' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', marginBottom: '0.15rem' }}>
+                <CheckCircle size={14} color="#93c5fd" />
+                <span style={{ fontSize: '0.8rem', fontWeight: 600, color: '#fff' }}>
+                  Workload Balance
+                </span>
+              </div>
+              <p style={{ fontSize: '0.72rem', color: 'rgba(255,255,255,0.7)', margin: 0 }}>
+                {filteredMemberWorkload.filter(m => m.active > 3).length > 0
+                  ? `${filteredMemberWorkload.filter(m => m.active > 3).length} member(s) have heavy workload. Consider redistributing.`
+                  : `${attendance}% of team is actively engaged this sprint.`}
+              </p>
+            </div>
+          </div>
+        </div>
+
+        {/* Recommended Actions */}
+        <div style={{ background: 'var(--bg-card)', borderRadius: '12px', border: '1px solid var(--border-color)', padding: '1rem' }}>
+          <h3 style={{ fontSize: '0.85rem', fontWeight: 600, marginBottom: '0.75rem', color: 'var(--text-primary)' }}>Recommended Actions</h3>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+            <div style={{ padding: '0.6rem 0.75rem', borderRadius: '8px', background: 'linear-gradient(135deg, #7c3aed, #8b5cf6)', border: '1px solid #7c3aed30' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', marginBottom: '0.15rem' }}>
+                <Users size={14} color="#c4b5fd" />
+                <span style={{ fontSize: '0.8rem', fontWeight: 600, color: '#fff' }}>Schedule Team Building</span>
+              </div>
+              <p style={{ fontSize: '0.72rem', color: 'rgba(255,255,255,0.7)', margin: 0 }}>Plan activities to boost team cohesion</p>
+            </div>
+            <div style={{ padding: '0.6rem 0.75rem', borderRadius: '8px', background: 'linear-gradient(135deg, #d97706, #f59e0b)', border: '1px solid #d9770630' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', marginBottom: '0.15rem' }}>
+                <MessageSquare size={14} color="#fde68a" />
+                <span style={{ fontSize: '0.8rem', fontWeight: 600, color: '#fff' }}>Feedback Session</span>
+              </div>
+              <p style={{ fontSize: '0.72rem', color: 'rgba(255,255,255,0.7)', margin: 0 }}>Conduct quarterly feedback review</p>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Refresh + Cache Info */}
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '0.5rem' }}>
+        <span style={{ fontSize: '0.7rem', color: 'var(--text-muted)' }}>
+          {lastCacheTime ? `Last updated: ${format(new Date(lastCacheTime), 'MMM d, h:mm a')}` : ''}
+          {slackRefreshing && ' — Refreshing...'}
+        </span>
+        <button
+          onClick={() => fetchSlackData(true)}
+          disabled={slackRefreshing}
+          style={{
+            display: 'flex', alignItems: 'center', gap: '0.4rem',
+            padding: '0.4rem 0.75rem', borderRadius: '6px',
+            border: '1px solid var(--border-color)', background: 'var(--bg-hover)',
+            color: 'var(--accent-primary)', fontSize: '0.75rem', fontWeight: 600, cursor: 'pointer',
+          }}
+        >
+          {slackRefreshing ? <Loader2 size={12} className="spin" /> : <RefreshCw size={12} />} Refresh Slack Data
+        </button>
+      </div>
+    </div>
+  );
+};
+
+// ─── PS PRODUCTIVITY & TEAM METRICS ──────────────────────────────────
+const PSProductivityMetrics = ({ teamConfig = PS_POS_TEAM_CONFIG }) => {
+  const [tickets, setTickets] = useState([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    if (!DEVREV_TOKEN) { setLoading(false); return; }
+    (async () => {
+      try {
+        let allWorks = [], cursor = null;
+        do {
+          const params = buildDevRevParams(teamConfig, cursor);
+          const res = await fetch(`https://api.devrev.ai/works.list?${params}`, { headers: { 'Authorization': `Bearer ${DEVREV_TOKEN}` } });
+          if (!res.ok) break;
+          const data = await res.json();
+          allWorks = allWorks.concat(data.works || []);
+          cursor = data.next_cursor || null;
+          if (allWorks.length >= 500) break;
+        } while (cursor);
+        setTickets(allWorks);
+      } catch { }
+      finally { setLoading(false); }
+    })();
+  }, [teamConfig]);
+
+  const active = useMemo(() => tickets.filter(t => !['completed', 'done', 'wont_fix', 'archived'].includes(t.stage?.name?.toLowerCase())), [tickets]);
+
+  const sprintInfo = useMemo(() => {
+    const t = tickets.find(t => t.sprint);
+    if (!t?.sprint) return null;
+    return { name: t.sprint.name, start: t.sprint.start_date, end: t.sprint.end_date, state: t.sprint.state };
+  }, [tickets]);
+
+  const isTicketCompleted = useCallback((t) => {
+    const hasUnassigned = (t.owned_by || []).some(o => o.display_name === 'Unassigned' || o.type === 'service_account');
+    const hasDoneStage = ['completed', 'done'].includes(t.stage?.name?.toLowerCase());
+    return hasUnassigned || hasDoneStage;
+  }, []);
+
+  const memberStats = useMemo(() => {
+    const map = {};
+    tickets.forEach(t => {
+      (t.owned_by || []).forEach(o => {
+        if (o.display_name === 'Unassigned' || o.type === 'service_account') return;
+        const name = o.display_name || o.full_name || 'Unknown';
+        const email = o.email || '';
+        if (!map[name]) map[name] = { name, email, total: 0 };
+        map[name].total++;
+      });
+    });
+    return Object.values(map).sort((a, b) => b.total - a.total);
+  }, [tickets]);
+
+  const completedByCreator = useMemo(() => {
+    return tickets.filter(isTicketCompleted).length;
+  }, [tickets]);
+
+  const completionRate = tickets.length > 0 ? Math.round((completedByCreator / tickets.length) * 1000) / 10 : 0;
+
+  const maxTickets = memberStats.length > 0 ? Math.max(...memberStats.map(m => m.total)) : 1;
+
+  const statCard = (icon, label, value, color) => (
+    <div style={{ padding: '1rem', borderRadius: '12px', background: 'var(--bg-card)', border: '1px solid var(--border-color)', textAlign: 'center' }}>
+      <div style={{ width: 36, height: 36, borderRadius: '10px', background: color + '18', display: 'flex', alignItems: 'center', justifyContent: 'center', margin: '0 auto 0.5rem', color }}>
+        {icon}
+      </div>
+      <div style={{ fontSize: '0.65rem', color: 'var(--text-muted)', marginBottom: '0.2rem' }}>{label}</div>
+      <div style={{ fontSize: '1.4rem', fontWeight: 700, color: 'var(--text-primary)' }}>{value}</div>
+    </div>
+  );
+
+  if (loading) return (
+    <div className="dashboard-container" style={{ padding: '1.5rem' }}>
+      <div className="loading-state"><Loader2 size={32} className="spin" /><p>Loading DevRev data...</p></div>
+    </div>
+  );
+
+  return (
+    <div className="dashboard-container" style={{ padding: '1.5rem' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '1.25rem' }}>
+        <div>
+          <h2 style={{ fontSize: '1.25rem', fontWeight: 600, marginBottom: '0.25rem' }}>Productivity & Team Metrics</h2>
+          <p style={{ fontSize: '0.85rem', color: 'var(--text-muted)', margin: 0 }}>Track performance, analyze productivity patterns, and optimize team efficiency.</p>
+        </div>
+        {sprintInfo && (
+          <div style={{ padding: '0.5rem 0.75rem', borderRadius: '8px', background: 'var(--bg-hover)', border: '1px solid var(--border-color)', textAlign: 'right' }}>
+            <div style={{ fontSize: '0.8rem', fontWeight: 600, color: 'var(--accent-primary)' }}>{sprintInfo.name}</div>
+            <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)' }}>
+              {format(new Date(sprintInfo.start), 'MMM d')} — {format(new Date(sprintInfo.end), 'MMM d, yyyy')}
+            </div>
+            <span style={{
+              fontSize: '0.6rem', fontWeight: 600, padding: '0.1rem 0.35rem', borderRadius: '4px',
+              background: sprintInfo.state === 'active' ? '#d1fae5' : '#f3f4f6',
+              color: sprintInfo.state === 'active' ? '#059669' : '#6b7280',
+            }}>{sprintInfo.state}</span>
+          </div>
+        )}
+      </div>
+
+      {/* Stats Cards */}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '0.75rem', marginBottom: '1.25rem' }}>
+        {statCard(<CheckCircle size={18} />, 'Completed', completedByCreator, '#059669')}
+        {statCard(<Clock size={18} />, 'In Progress', active.length, '#2563eb')}
+        {statCard(<PieChart size={18} />, 'Completion Rate', `${completionRate}%`, '#7c3aed')}
+        {statCard(<Users size={18} />, 'Team Members', `${memberStats.length}`, '#d97706')}
+      </div>
+
+      {/* DevRev Team Stats + Work Distribution */}
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.75rem', marginBottom: '1.25rem' }}>
+        {/* Team Statistics */}
+        <div style={{ background: 'var(--bg-card)', borderRadius: '12px', border: '1px solid var(--border-color)', padding: '1rem' }}>
+          <h3 style={{ fontSize: '0.85rem', fontWeight: 600, marginBottom: '1rem', color: 'var(--text-primary)' }}>DevRev Team Statistics</h3>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.6rem' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.8rem' }}>
+                <span style={{ color: 'var(--text-muted)' }}>Total Completed</span>
+                <span style={{ fontWeight: 600, color: 'var(--text-primary)' }}>{completedByCreator}</span>
+              </div>
+              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.8rem' }}>
+                <span style={{ color: 'var(--text-muted)' }}>Completion Rate</span>
+                <span style={{ fontWeight: 600, color: 'var(--text-primary)' }}>{completionRate}%</span>
+              </div>
+              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.8rem' }}>
+                <span style={{ color: 'var(--text-muted)' }}>Members Found</span>
+                <span style={{ fontWeight: 600, color: 'var(--text-primary)' }}>{memberStats.length}</span>
+              </div>
+          </div>
+        </div>
+
+        {/* Team Work Distribution */}
+        <div style={{ background: 'var(--bg-card)', borderRadius: '12px', border: '1px solid var(--border-color)', padding: '1rem' }}>
+          <h3 style={{ fontSize: '0.85rem', fontWeight: 600, marginBottom: '1rem', color: 'var(--text-primary)' }}>Team Work Distribution</h3>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+            {memberStats.slice(0, 5).map((m, i) => (
+              <div key={i} style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                <span style={{ fontSize: '0.75rem', color: 'var(--text-primary)', minWidth: '30px', textAlign: 'right' }}>{m.total}</span>
+                <div style={{ flex: 1, height: 8, borderRadius: 4, background: 'var(--bg-hover)', overflow: 'hidden' }}>
+                  <div style={{ height: '100%', borderRadius: 4, width: `${(m.total / maxTickets) * 100}%`, background: ['#4f46e5', '#059669', '#d97706', '#0ea5e9', '#7c3aed'][i % 5] }} />
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      {/* Team Members Details */}
+      <div style={{ background: 'var(--bg-card)', borderRadius: '12px', border: '1px solid var(--border-color)', padding: '1rem' }}>
+        <h3 style={{ fontSize: '0.85rem', fontWeight: 600, marginBottom: '0.75rem', color: 'var(--text-primary)' }}>Team Members Details</h3>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))', gap: '0.75rem' }}>
+          {memberStats.map((m, i) => (
+            <div key={i} style={{ padding: '0.75rem', borderRadius: '10px', background: 'var(--bg-hover)', border: '1px solid var(--border-color)' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.4rem' }}>
+                <div style={{
+                  width: 32, height: 32, borderRadius: '50%',
+                  background: ['#4f46e5', '#059669', '#d97706', '#0ea5e9', '#7c3aed'][i % 5],
+                  color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  fontSize: '0.75rem', fontWeight: 700,
+                }}>
+                  {m.name.split(' ').map(n => n[0]).join('').substring(0, 2)}
+                </div>
+                <div>
+                  <div style={{ fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-primary)' }}>{m.name}</div>
+                  {m.email && <div style={{ fontSize: '0.65rem', color: 'var(--text-muted)' }}>{m.email}</div>}
+                </div>
+              </div>
+              <div style={{ display: 'flex', gap: '0.5rem', fontSize: '0.7rem', color: 'var(--text-muted)' }}>
+                <span>{m.total} assigned</span>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+};
+
+const Dashboard = ({ rosterData, currentDate, onChangeDate, loading, headerAction, deptName, isSheetsEnabled, onOpenDevRev, onOpenSlack, sheets, teamConfig = PS_POS_TEAM_CONFIG }) => {
   const [viewDate, setViewDate] = useState(new Date());
   const isViewingToday = format(viewDate, 'yyyy-MM-dd') === format(new Date(), 'yyyy-MM-dd');
 
@@ -360,7 +2117,9 @@ const Dashboard = ({ rosterData, currentDate, onChangeDate, loading, headerActio
         {headerAction}
       </div>
 
-      {loading ? (
+      {isSheetsEnabled ? (
+        <PSDashboardHome deptName={deptName} sheets={sheets} teamConfig={teamConfig} />
+      ) : loading ? (
         <div className="loading-state">
           <Loader2 size={32} className="spin" />
           <p>Loading roster data...</p>
@@ -849,7 +2608,1130 @@ const RosterTable = ({ rosterData, currentDate, onChangeDate, isAdmin, loading, 
   );
 };
 
+// ─── DEVREV TICKETS MODAL ──────────────────────────────────
+const DEVREV_STATUS_STYLES = {
+  triage:      { bg: '#f3f4f6', color: '#6b7280', label: 'Triage' },
+  open:        { bg: '#dbeafe', color: '#1d4ed8', label: 'Open' },
+  in_progress: { bg: '#fef3c7', color: '#d97706', label: 'In Progress' },
+  in_review:   { bg: '#ede9fe', color: '#7c3aed', label: 'In Review' },
+  completed:   { bg: '#d1fae5', color: '#059669', label: 'Done' },
+  done:        { bg: '#d1fae5', color: '#059669', label: 'Done' },
+  wont_fix:    { bg: '#f3f4f6', color: '#6b7280', label: "Won't Fix" },
+  archived:    { bg: '#f3f4f6', color: '#6b7280', label: 'Archived' },
+};
+
+const DEVREV_PRIORITY_STYLES = {
+  p0: { bg: '#fef2f2', color: '#dc2626', label: 'P0' },
+  p1: { bg: '#fff7ed', color: '#ea580c', label: 'P1' },
+  p2: { bg: '#fefce8', color: '#ca8a04', label: 'P2' },
+  p3: { bg: '#eff6ff', color: '#2563eb', label: 'P3' },
+  p4: { bg: '#f9fafb', color: '#6b7280', label: 'P4' },
+};
+
+const DevRevTicketsModal = ({ onClose }) => {
+  const [activeTeam, setActiveTeam] = useState('ps-pos'); // 'ps-pos' | 'ps-enterprise'
+
+  // PS-POS state
+  const [tickets, setTickets] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+  const [search, setSearch] = useState('');
+  const [posSelectedOwner, setPosSelectedOwner] = useState(null);
+  const [collapsedGroups, setCollapsedGroups] = useState({});
+  const [memberEpics, setMemberEpics] = useState([]);
+  const [epicsLoading, setEpicsLoading] = useState(false);
+  const [collapsedEpicGroups, setCollapsedEpicGroups] = useState({});
+
+  // PS-Enterprise state
+  const [entLoading, setEntLoading] = useState(false);
+  const [entError, setEntError] = useState('');
+  const [entGroups, setEntGroups] = useState([]); // [{runnableId, runnableName, issues[]}]
+  const [collapsedEntGroups, setCollapsedEntGroups] = useState({});
+  const [entSearch, setEntSearch] = useState('');
+  const [entSelectedOwner, setEntSelectedOwner] = useState(null);
+
+  const fetchEnterpriseIssues = useCallback(async () => {
+    setEntLoading(true);
+    setEntError('');
+    try {
+      const allByPart = {};
+      await Promise.all(
+        DEVREV_PS_ENTERPRISE_PARTS.map(async (partId) => {
+          let allWorks = [];
+          let cursor = null;
+          do {
+            const params = new URLSearchParams({ type: 'issue', applies_to_part: partId, limit: '100' });
+            if (cursor) params.append('cursor', cursor);
+            const res = await fetch(`https://api.devrev.ai/works.list?${params.toString()}`, {
+              headers: { Authorization: `Bearer ${DEVREV_TOKEN}` },
+            });
+            if (!res.ok) break;
+            const data = await res.json();
+            allWorks = allWorks.concat(data.works || []);
+            cursor = data.next_cursor || null;
+            if (allWorks.length >= 500) break;
+          } while (cursor);
+          if (allWorks.length > 0) {
+            const part = allWorks[0]?.applies_to_part || {};
+            allByPart[partId] = {
+              runnableId: part.display_id || partId,
+              runnableName: part.name || partId,
+              issues: allWorks,
+            };
+          }
+        })
+      );
+      setEntGroups(Object.values(allByPart).sort((a, b) => b.issues.length - a.issues.length));
+    } catch (e) {
+      setEntError(e.message);
+    } finally {
+      setEntLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (activeTeam === 'ps-enterprise' && entGroups.length === 0 && !entLoading) {
+      fetchEnterpriseIssues();
+    }
+  }, [activeTeam, entGroups.length, entLoading, fetchEnterpriseIssues]);
+
+  const fetchMemberEpics = useCallback(async (assignees) => {
+    if (!assignees.length) return;
+    setEpicsLoading(true);
+    try {
+      const results = await Promise.all(
+        assignees.map(async ({ id, name }) => {
+          let allIssues = [];
+          let cursor = null;
+          do {
+            const params = new URLSearchParams({ type: 'issue', limit: '100' });
+            params.append('owned_by', id);
+            if (cursor) params.append('cursor', cursor);
+            const res = await fetch(`https://api.devrev.ai/works.list?${params.toString()}`, {
+              headers: { Authorization: `Bearer ${DEVREV_TOKEN}` },
+            });
+            if (!res.ok) break;
+            const data = await res.json();
+            allIssues = allIssues.concat(data.works || []);
+            cursor = data.next_cursor || null;
+            if (allIssues.length >= 500) break;
+          } while (cursor);
+
+          const epicMap = {};
+          for (const issue of allIssues) {
+            const part = issue.applies_to_part;
+            if (!part) continue;
+            const key = part.display_id || part.id;
+            if (!epicMap[key]) epicMap[key] = { id: part.display_id || '', name: part.name || 'Unknown', count: 0 };
+            epicMap[key].count++;
+          }
+          return {
+            memberId: id,
+            memberName: name,
+            totalIssues: allIssues.length,
+            epics: Object.values(epicMap).sort((a, b) => b.count - a.count),
+          };
+        })
+      );
+      setMemberEpics(results.filter(r => r.epics.length > 0));
+    } catch (_) {
+      // silently fail epics
+    } finally {
+      setEpicsLoading(false);
+    }
+  }, []);
+
+  const fetchAllTickets = useCallback(async () => {
+    setLoading(true);
+    setError('');
+    setMemberEpics([]);
+    try {
+      let allWorks = [];
+      let cursor = null;
+      do {
+        const params = new URLSearchParams();
+        params.append('type', 'issue');
+        params.append('issue.sprint', DEVREV_SPRINT_ID);
+        params.append('limit', '100');
+        if (cursor) params.append('cursor', cursor);
+
+        const res = await fetch(`https://api.devrev.ai/works.list?${params.toString()}`, {
+          headers: { 'Authorization': `Bearer ${DEVREV_TOKEN}` },
+        });
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}));
+          throw new Error(err.message || `DevRev API error ${res.status}`);
+        }
+        const data = await res.json();
+        allWorks = allWorks.concat(data.works || []);
+        cursor = data.next_cursor || null;
+        if (allWorks.length >= 500) break;
+      } while (cursor);
+      setTickets(allWorks);
+
+      // extract unique real assignees then load their epics
+      const seenIds = new Set();
+      const assignees = [];
+      for (const work of allWorks) {
+        for (const owner of (work.owned_by || [])) {
+          if (owner.type === 'dev_user' && !seenIds.has(owner.id)) {
+            seenIds.add(owner.id);
+            assignees.push({ id: owner.id, name: owner.display_name || owner.full_name || 'Unknown' });
+          }
+        }
+      }
+      fetchMemberEpics(assignees);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setLoading(false);
+    }
+  }, [fetchMemberEpics]);
+
+  useEffect(() => { fetchAllTickets(); }, [fetchAllTickets]);
+
+  const posOwners = useMemo(() => {
+    const seen = new Set();
+    const list = [];
+    tickets.forEach(t => {
+      (t.owned_by || []).forEach(o => {
+        if (o.type === 'dev_user' && !seen.has(o.display_name)) {
+          seen.add(o.display_name);
+          list.push(o.display_name);
+        }
+      });
+    });
+    return list.sort();
+  }, [tickets]);
+
+  const filtered = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    return tickets.filter(t => {
+      const matchesSearch = !q || t.title?.toLowerCase().includes(q) || t.display_id?.toLowerCase().includes(q);
+      const matchesOwner = !posSelectedOwner || (t.owned_by || []).some(o => o.display_name === posSelectedOwner);
+      return matchesSearch && matchesOwner;
+    });
+  }, [tickets, search, posSelectedOwner]);
+
+  const filteredMemberEpics = useMemo(() => {
+    if (!posSelectedOwner) return memberEpics;
+    return memberEpics.filter(m => m.memberName === posSelectedOwner);
+  }, [memberEpics, posSelectedOwner]);
+
+  const grouped = useMemo(() => {
+    const map = {};
+    filtered.forEach(t => {
+      const owners = t.owned_by?.length
+        ? t.owned_by
+        : [{ id: '__unassigned__', display_name: 'Unassigned' }];
+      owners.forEach(owner => {
+        const key = owner.id || '__unassigned__';
+        if (!map[key]) map[key] = { name: owner.display_name || owner.full_name || 'Unassigned', items: [] };
+        map[key].items.push(t);
+      });
+    });
+    return Object.entries(map).sort(([, a], [, b]) => b.items.length - a.items.length);
+  }, [filtered]);
+
+  const toggleGroup = (key) =>
+    setCollapsedGroups(prev => ({ ...prev, [key]: !prev[key] }));
+
+  const toggleEpicGroup = (key) =>
+    setCollapsedEpicGroups(prev => ({ ...prev, [key]: !prev[key] }));
+
+  const toggleEntGroup = (key) =>
+    setCollapsedEntGroups(prev => ({ ...prev, [key]: !prev[key] }));
+
+  const ticketUrl = (displayId) =>
+    `https://app.devrev.ai/${DEVREV_ORG}/works/${displayId}`;
+
+  const entOwners = useMemo(() => {
+    const seen = new Set();
+    const list = [];
+    entGroups.forEach(g => g.issues.forEach(i => {
+      (i.owned_by || []).forEach(o => {
+        if (!seen.has(o.display_name)) { seen.add(o.display_name); list.push(o.display_name); }
+      });
+    }));
+    return list.sort();
+  }, [entGroups]);
+
+  const filteredEntGroups = useMemo(() => {
+    const q = entSearch.trim().toLowerCase();
+    return entGroups.map(g => ({
+      ...g,
+      issues: g.issues.filter(i => {
+        const matchesSearch = !q || i.title?.toLowerCase().includes(q) || i.display_id?.toLowerCase().includes(q);
+        const matchesOwner = !entSelectedOwner || (i.owned_by || []).some(o => o.display_name === entSelectedOwner);
+        return matchesSearch && matchesOwner;
+      }),
+    })).filter(g => g.issues.length > 0);
+  }, [entGroups, entSearch, entSelectedOwner]);
+
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div
+        className="modal-content"
+        onClick={e => e.stopPropagation()}
+        style={{ maxWidth: '820px', width: '95vw', maxHeight: '90vh', display: 'flex', flexDirection: 'column', padding: 0 }}
+      >
+        {/* Header */}
+        <div className="modal-header" style={{ padding: '0.75rem 1.25rem', flexShrink: 0 }}>
+          <h2 style={{ fontSize: '1.1rem', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+            <Briefcase size={18} />
+            DevRev Tickets
+          </h2>
+          <div style={{ display: 'flex', gap: '0.4rem', alignItems: 'center' }}>
+            <button
+              onClick={activeTeam === 'ps-pos' ? fetchAllTickets : fetchEnterpriseIssues}
+              title="Refresh"
+              style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-muted)', display: 'flex', alignItems: 'center' }}
+            >
+              <RefreshCw size={15} className={(loading || entLoading) ? 'spin' : ''} />
+            </button>
+            <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-muted)', display: 'flex', alignItems: 'center' }}>
+              <X size={20} />
+            </button>
+          </div>
+        </div>
+
+        {/* Team Tabs */}
+        <div style={{ display: 'flex', gap: '0.4rem', padding: '0 1.25rem 0.75rem', flexShrink: 0, borderBottom: '1px solid var(--border-color)' }}>
+          {[
+            { id: 'ps-pos', label: 'PS-POS' },
+            { id: 'ps-enterprise', label: 'PS-Enterprise' },
+          ].map(tab => (
+            <button
+              key={tab.id}
+              onClick={() => setActiveTeam(tab.id)}
+              style={{
+                padding: '0.3rem 0.85rem',
+                borderRadius: '20px',
+                border: activeTeam === tab.id ? 'none' : '1px solid var(--border-color)',
+                background: activeTeam === tab.id ? 'var(--accent-primary)' : 'transparent',
+                color: activeTeam === tab.id ? '#fff' : 'var(--text-secondary)',
+                fontSize: '0.8rem',
+                fontWeight: 600,
+                cursor: 'pointer',
+              }}
+            >
+              {tab.label}
+            </button>
+          ))}
+        </div>
+
+        {/* Errors */}
+        {activeTeam === 'ps-pos' && error && (
+          <div style={{ margin: '0.5rem 1.25rem 0', padding: '0.5rem 0.75rem', background: '#fef2f2', color: '#dc2626', borderRadius: '6px', fontSize: '0.8rem', flexShrink: 0 }}>
+            <AlertCircle size={14} style={{ verticalAlign: 'middle', marginRight: '4px' }} /> {error}
+          </div>
+        )}
+        {activeTeam === 'ps-enterprise' && entError && (
+          <div style={{ margin: '0.5rem 1.25rem 0', padding: '0.5rem 0.75rem', background: '#fef2f2', color: '#dc2626', borderRadius: '6px', fontSize: '0.8rem', flexShrink: 0 }}>
+            <AlertCircle size={14} style={{ verticalAlign: 'middle', marginRight: '4px' }} /> {entError}
+          </div>
+        )}
+
+        {/* Body */}
+        <div style={{ overflow: 'auto', flex: 1, padding: '0 1.25rem 1.25rem' }}>
+          {/* ── PS-ENTERPRISE TAB ── */}
+          {activeTeam === 'ps-enterprise' && (
+            entLoading ? (
+              <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', padding: '3rem', color: 'var(--text-muted)' }}>
+                <Loader2 size={24} className="spin" />
+              </div>
+            ) : (
+              <>
+                <div style={{ paddingTop: '0.75rem', marginBottom: '0.5rem' }}>
+                  <input
+                    className="form-input"
+                    value={entSearch}
+                    onChange={e => setEntSearch(e.target.value)}
+                    placeholder="Search by title or ID…"
+                    style={{ width: '100%', fontSize: '0.85rem' }}
+                  />
+                </div>
+                {entOwners.length > 0 && (
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.35rem', marginBottom: '0.75rem' }}>
+                    <button
+                      onClick={() => setEntSelectedOwner(null)}
+                      style={{
+                        padding: '0.2rem 0.6rem', borderRadius: '12px', fontSize: '0.72rem', fontWeight: 600, cursor: 'pointer',
+                        border: entSelectedOwner === null ? 'none' : '1px solid var(--border-color)',
+                        background: entSelectedOwner === null ? 'var(--accent-primary)' : 'transparent',
+                        color: entSelectedOwner === null ? '#fff' : 'var(--text-secondary)',
+                      }}
+                    >
+                      All
+                    </button>
+                    {entOwners.map(name => (
+                      <button
+                        key={name}
+                        onClick={() => setEntSelectedOwner(entSelectedOwner === name ? null : name)}
+                        style={{
+                          padding: '0.2rem 0.6rem', borderRadius: '12px', fontSize: '0.72rem', fontWeight: 500, cursor: 'pointer',
+                          border: entSelectedOwner === name ? 'none' : '1px solid var(--border-color)',
+                          background: entSelectedOwner === name ? 'var(--accent-primary)' : 'transparent',
+                          color: entSelectedOwner === name ? '#fff' : 'var(--text-secondary)',
+                        }}
+                      >
+                        {name}
+                      </button>
+                    ))}
+                  </div>
+                )}
+                {filteredEntGroups.length === 0 ? (
+                  <div style={{ textAlign: 'center', padding: '3rem', color: 'var(--text-muted)', fontSize: '0.9rem' }}>No issues found</div>
+                ) : (
+                  filteredEntGroups.map(({ runnableId, runnableName, issues }) => (
+                    <div key={runnableId} style={{ marginBottom: '0.75rem' }}>
+                      <button
+                        onClick={() => toggleEntGroup(runnableId)}
+                        style={{
+                          display: 'flex', alignItems: 'center', gap: '0.5rem',
+                          width: '100%', padding: '0.5rem 0.6rem',
+                          background: 'var(--bg-hover)', border: 'none', borderRadius: '6px',
+                          cursor: 'pointer', textAlign: 'left',
+                          color: 'var(--text-primary)', fontWeight: 600, fontSize: '0.88rem',
+                        }}
+                      >
+                        {collapsedEntGroups[runnableId] ? <ChevronRight size={15} /> : <ChevronDown size={15} />}
+                        <span style={{ flex: 1 }}>{runnableName}</span>
+                        <span style={{ fontSize: '0.7rem', fontFamily: 'monospace', color: 'var(--text-muted)', marginRight: '0.4rem' }}>{runnableId}</span>
+                        <span style={{ fontSize: '0.72rem', fontWeight: 600, color: 'var(--text-muted)', background: 'var(--bg-secondary)', padding: '0.1rem 0.45rem', borderRadius: '10px' }}>
+                          {issues.length}
+                        </span>
+                      </button>
+                      {!collapsedEntGroups[runnableId] && (
+                        <div style={{ borderLeft: '2px solid var(--border-color)', marginLeft: '0.6rem' }}>
+                          {issues.map(issue => {
+                            const stageKey = (issue.stage?.name || '').toLowerCase().replace(/ /g, '_');
+                            const priority = (issue.priority || 'p4').toLowerCase();
+                            const statusStyle = DEVREV_STATUS_STYLES[stageKey] || DEVREV_STATUS_STYLES.open;
+                            const priorityStyle = DEVREV_PRIORITY_STYLES[priority] || DEVREV_PRIORITY_STYLES.p4;
+                            const owners = (issue.owned_by || []).map(o => o.display_name).join(', ') || 'Unassigned';
+                            return (
+                              <div key={issue.id} style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', padding: '0.55rem 0.75rem', borderBottom: '1px solid var(--border-color)' }}>
+                                <a
+                                  href={ticketUrl(issue.display_id)}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  style={{ color: 'var(--text-muted)', fontSize: '0.72rem', fontFamily: 'monospace', flexShrink: 0, textDecoration: 'none', whiteSpace: 'nowrap' }}
+                                >
+                                  {issue.display_id}
+                                </a>
+                                <a
+                                  href={ticketUrl(issue.display_id)}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  style={{ flex: 1, color: 'var(--text-primary)', fontSize: '0.83rem', textDecoration: 'none', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+                                  title={issue.title}
+                                >
+                                  {issue.title}
+                                </a>
+                                <div style={{ display: 'flex', gap: '0.3rem', flexShrink: 0, alignItems: 'center' }}>
+                                  <span style={{ fontSize: '0.68rem', color: 'var(--text-muted)', whiteSpace: 'nowrap' }}>{owners}</span>
+                                  <span style={{ padding: '0.12rem 0.4rem', borderRadius: '4px', fontSize: '0.68rem', fontWeight: 700, background: priorityStyle.bg, color: priorityStyle.color }}>
+                                    {priorityStyle.label}
+                                  </span>
+                                  <span style={{ padding: '0.12rem 0.4rem', borderRadius: '4px', fontSize: '0.68rem', fontWeight: 500, background: statusStyle.bg, color: statusStyle.color }}>
+                                    {statusStyle.label}
+                                  </span>
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+                  ))
+                )}
+              </>
+            )
+          )}
+
+          {/* ── PS-POS TAB ── */}
+          {activeTeam === 'ps-pos' && loading ? (
+            <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', padding: '3rem', color: 'var(--text-muted)' }}>
+              <Loader2 size={24} className="spin" />
+            </div>
+          ) : activeTeam === 'ps-pos' && (
+            <>
+              {/* ── NAME FILTER ── */}
+              <div style={{ paddingTop: '0.75rem', marginBottom: '0.5rem' }}>
+                <input
+                  className="form-input"
+                  value={search}
+                  onChange={e => setSearch(e.target.value)}
+                  placeholder="Search by title or ID…"
+                  style={{ width: '100%', fontSize: '0.85rem' }}
+                />
+              </div>
+              {posOwners.length > 0 && (
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.35rem', marginBottom: '1rem' }}>
+                  <button
+                    onClick={() => setPosSelectedOwner(null)}
+                    style={{
+                      padding: '0.2rem 0.6rem', borderRadius: '12px', fontSize: '0.72rem', fontWeight: 600, cursor: 'pointer',
+                      border: posSelectedOwner === null ? 'none' : '1px solid var(--border-color)',
+                      background: posSelectedOwner === null ? 'var(--accent-primary)' : 'transparent',
+                      color: posSelectedOwner === null ? '#fff' : 'var(--text-secondary)',
+                    }}
+                  >
+                    All
+                  </button>
+                  {posOwners.map(name => (
+                    <button
+                      key={name}
+                      onClick={() => setPosSelectedOwner(posSelectedOwner === name ? null : name)}
+                      style={{
+                        padding: '0.2rem 0.6rem', borderRadius: '12px', fontSize: '0.72rem', fontWeight: 500, cursor: 'pointer',
+                        border: posSelectedOwner === name ? 'none' : '1px solid var(--border-color)',
+                        background: posSelectedOwner === name ? 'var(--accent-primary)' : 'transparent',
+                        color: posSelectedOwner === name ? '#fff' : 'var(--text-secondary)',
+                      }}
+                    >
+                      {name}
+                    </button>
+                  ))}
+                </div>
+              )}
+
+              {/* ── MEMBER EPICS SECTION ── */}
+              <div style={{ marginBottom: '1.5rem' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.6rem', paddingBottom: '0.4rem', borderBottom: '2px solid var(--border-color)' }}>
+                  <h3 style={{ margin: 0, fontSize: '0.82rem', fontWeight: 700, color: 'var(--text-primary)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+                    Member Epics
+                  </h3>
+                  {epicsLoading
+                    ? <Loader2 size={12} className="spin" style={{ color: 'var(--text-muted)' }} />
+                    : <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>{filteredMemberEpics.length} members</span>
+                  }
+                </div>
+
+                {epicsLoading && memberEpics.length === 0 ? (
+                  <div style={{ padding: '1rem', color: 'var(--text-muted)', fontSize: '0.82rem', textAlign: 'center' }}>
+                    <Loader2 size={14} className="spin" style={{ verticalAlign: 'middle', marginRight: '6px' }} />
+                    Loading member epics…
+                  </div>
+                ) : filteredMemberEpics.length === 0 ? (
+                  <div style={{ padding: '0.5rem', color: 'var(--text-muted)', fontSize: '0.8rem' }}>No epic data found.</div>
+                ) : (
+                  filteredMemberEpics.map(({ memberId, memberName, totalIssues, epics }) => (
+                    <div key={memberId} style={{ marginBottom: '0.4rem' }}>
+                      <button
+                        onClick={() => toggleEpicGroup(memberId)}
+                        style={{
+                          display: 'flex', alignItems: 'center', gap: '0.5rem',
+                          width: '100%', padding: '0.45rem 0.6rem',
+                          background: 'var(--bg-hover)', border: 'none', borderRadius: '6px',
+                          cursor: 'pointer', textAlign: 'left',
+                          color: 'var(--text-primary)', fontWeight: 600, fontSize: '0.85rem',
+                        }}
+                      >
+                        {collapsedEpicGroups[memberId] ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
+                        <span style={{ flex: 1 }}>{memberName}</span>
+                        <span style={{ fontSize: '0.7rem', fontWeight: 500, color: 'var(--text-muted)', background: 'var(--bg-secondary)', padding: '0.1rem 0.4rem', borderRadius: '10px' }}>
+                          {totalIssues} issues · {epics.length} epics
+                        </span>
+                      </button>
+                      {!collapsedEpicGroups[memberId] && (
+                        <div style={{ borderLeft: '2px solid var(--border-color)', marginLeft: '0.6rem', marginTop: '0.2rem' }}>
+                          {epics.map(epic => (
+                            <div key={epic.id} style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', padding: '0.3rem 0.6rem', borderBottom: '1px solid var(--border-color)' }}>
+                              <span style={{ color: 'var(--text-muted)', fontSize: '0.7rem', fontFamily: 'monospace', flexShrink: 0 }}>
+                                {epic.id}
+                              </span>
+                              <span style={{ flex: 1, fontSize: '0.82rem', color: 'var(--text-primary)' }}>{epic.name}</span>
+                              <span style={{ fontSize: '0.68rem', fontWeight: 600, background: '#dbeafe', color: '#1d4ed8', padding: '0.1rem 0.4rem', borderRadius: '10px', flexShrink: 0 }}>
+                                {epic.count}
+                              </span>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  ))
+                )}
+              </div>
+
+              {/* ── CURRENT SPRINT SECTION ── */}
+              <div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.6rem', paddingBottom: '0.4rem', borderBottom: '2px solid var(--border-color)' }}>
+                  <h3 style={{ margin: 0, fontSize: '0.82rem', fontWeight: 700, color: 'var(--text-primary)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+                    Current Sprint
+                  </h3>
+                  <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>{filtered.length} issues</span>
+                </div>
+                {grouped.length === 0 ? (
+                  <div style={{ textAlign: 'center', padding: '2rem', color: 'var(--text-muted)', fontSize: '0.9rem' }}>
+                    No tickets found
+                  </div>
+                ) : (
+                  grouped.map(([key, group]) => (
+                    <div key={key} style={{ marginBottom: '0.75rem' }}>
+                      <button
+                        onClick={() => toggleGroup(key)}
+                        style={{
+                          display: 'flex', alignItems: 'center', gap: '0.5rem',
+                          width: '100%', padding: '0.5rem 0.6rem',
+                          background: 'var(--bg-hover)', border: 'none', borderRadius: '6px',
+                          cursor: 'pointer', textAlign: 'left',
+                          color: 'var(--text-primary)', fontWeight: 600, fontSize: '0.88rem',
+                        }}
+                      >
+                        {collapsedGroups[key] ? <ChevronRight size={15} /> : <ChevronDown size={15} />}
+                        <span style={{ flex: 1 }}>{group.name}</span>
+                        <span style={{
+                          fontSize: '0.72rem', fontWeight: 600, color: 'var(--text-muted)',
+                          background: 'var(--bg-secondary)', padding: '0.1rem 0.45rem', borderRadius: '10px',
+                        }}>
+                          {group.items.length}
+                        </span>
+                      </button>
+
+                      {!collapsedGroups[key] && (
+                        <div style={{ borderLeft: '2px solid var(--border-color)', marginLeft: '0.6rem' }}>
+                          {group.items.map(ticket => {
+                            const stageKey = (ticket.stage?.name || '')
+                              .toLowerCase().replace(/ /g, '_');
+                            const priority = (ticket.priority || 'p4').toLowerCase();
+                            const statusStyle = DEVREV_STATUS_STYLES[stageKey] || DEVREV_STATUS_STYLES.open;
+                            const priorityStyle = DEVREV_PRIORITY_STYLES[priority] || DEVREV_PRIORITY_STYLES.p4;
+                            const epicName = ticket.applies_to_part?.name;
+
+                            return (
+                              <div
+                                key={ticket.id}
+                                style={{
+                                  display: 'flex', alignItems: 'center', gap: '0.75rem',
+                                  padding: '0.55rem 0.75rem',
+                                  borderBottom: '1px solid var(--border-color)',
+                                }}
+                              >
+                                <a
+                                  href={ticketUrl(ticket.display_id)}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  style={{ color: 'var(--text-muted)', fontSize: '0.72rem', fontFamily: 'monospace', flexShrink: 0, textDecoration: 'none', whiteSpace: 'nowrap' }}
+                                >
+                                  {ticket.display_id}
+                                </a>
+                                <a
+                                  href={ticketUrl(ticket.display_id)}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  style={{ flex: 1, color: 'var(--text-primary)', fontSize: '0.83rem', textDecoration: 'none', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+                                  title={ticket.title}
+                                >
+                                  {ticket.title}
+                                </a>
+                                <div style={{ display: 'flex', gap: '0.3rem', flexShrink: 0, alignItems: 'center' }}>
+                                  {epicName && (
+                                    <span style={{ padding: '0.12rem 0.4rem', borderRadius: '4px', fontSize: '0.65rem', fontWeight: 500, background: '#f3e8ff', color: '#7c3aed', maxWidth: '90px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={epicName}>
+                                      {epicName}
+                                    </span>
+                                  )}
+                                  <span style={{ padding: '0.12rem 0.4rem', borderRadius: '4px', fontSize: '0.68rem', fontWeight: 700, background: priorityStyle.bg, color: priorityStyle.color }}>
+                                    {priorityStyle.label}
+                                  </span>
+                                  <span style={{ padding: '0.12rem 0.4rem', borderRadius: '4px', fontSize: '0.68rem', fontWeight: 500, background: statusStyle.bg, color: statusStyle.color }}>
+                                    {statusStyle.label}
+                                  </span>
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+                  ))
+                )}
+              </div>
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// ─── SLACK THREADS MODAL ──────────────────────────────────
+function slackStripMarkup(text) {
+  return (text || '')
+    .replace(/<!subteam\^[A-Z0-9]+\|([^>]+)>/g, '@$1')
+    .replace(/<@[A-Z0-9]+\|([^>]+)>/g, '@$1')
+    .replace(/<@[A-Z0-9]+>/g, '@user')
+    .replace(/<#[A-Z0-9]+\|([^>]+)>/g, '#$1')
+    .replace(/<([^|>]+)\|([^>]+)>/g, '$2')
+    .replace(/<([^>]+)>/g, '$1')
+    .replace(/\n+/g, ' ')
+    .trim();
+}
+
+// Module-level fetch with auto-retry on rate limit
+async function slackGet(endpoint, params = {}, attempt = 0) {
+  const qs = new URLSearchParams(params);
+  const res = await fetch(`${SLACK_API_BASE}/${endpoint}?${qs}`, {
+    headers: { 'Authorization': `Bearer ${SLACK_BOT_TOKEN}` },
+  });
+  if (res.status === 429) {
+    if (attempt >= 3) throw new Error('ratelimited after retries');
+    const wait = parseInt(res.headers.get('Retry-After') || '5', 10);
+    await new Promise(r => setTimeout(r, (wait + 1) * 1000));
+    return slackGet(endpoint, params, attempt + 1);
+  }
+  const data = await res.json();
+  if (!data.ok && data.error === 'ratelimited') {
+    if (attempt >= 3) throw new Error('ratelimited after retries');
+    await new Promise(r => setTimeout(r, 5000));
+    return slackGet(endpoint, params, attempt + 1);
+  }
+  if (!data.ok) throw new Error(data.error || `Slack error: ${endpoint}`);
+  return data;
+}
+
+const SlackThreadsModal = ({ onClose }) => {
+  const [messages, setMessages] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [status, setStatus] = useState('Fetching channel list…');
+  const [errors, setErrors] = useState([]);
+  const [search, setSearch] = useState('');
+
+  const scanChannels = useCallback(async () => {
+    setLoading(true);
+    setErrors([]);
+    setMessages([]);
+
+    if (SLACK_CHANNEL_IDS.length === 0) {
+      setErrors(['No channels configured. Add VITE_SLACK_CHANNEL_IDS to your .env file.']);
+      setLoading(false);
+      return;
+    }
+
+    setStatus(`Resolving @${SLACK_SEARCH_HANDLE}…`);
+    try {
+      // 0. Resolve subteam ID — Slack API encodes mentions as <!subteam^ID> with no handle name
+      let subteamId = SLACK_SUBTEAM_ID;
+      if (!subteamId) {
+        try {
+          const ugData = await slackGet('usergroups.list');
+          const group = (ugData.usergroups || []).find(g => g.handle === SLACK_SEARCH_HANDLE);
+          subteamId = group?.id || '';
+        } catch { /* usergroups:read scope may be missing — will fall back to handle name */ }
+      }
+      // Match either by subteam ID tag or by handle name (fallback)
+      const mentionsHandle = (text) => {
+        if (!text) return false;
+        if (subteamId && text.includes(`<!subteam^${subteamId}>`)) return true;
+        return text.includes(SLACK_SEARCH_HANDLE);
+      };
+
+      // 1. Resolve channel IDs → names
+      setStatus(`Fetching info for ${SLACK_CHANNEL_IDS.length} channel(s)…`);
+      const channels = await Promise.all(SLACK_CHANNEL_IDS.map(async (id) => {
+        try {
+          const data = await slackGet('conversations.info', { channel: id });
+          return data.channel;
+        } catch {
+          return { id, name: id, is_private: false };
+        }
+      }));
+
+      // 2. Scan each channel — paginate history, then check thread replies
+      const oldest = String(Math.floor(Date.now() / 1000) - 30 * 24 * 3600);
+      const allMatches = [];
+      const scanErrors = [];
+
+      for (let i = 0; i < channels.length; i++) {
+        const ch = channels[i];
+        try {
+          let cursor;
+          let page = 0;
+          do {
+            page++;
+            setStatus(`Scanning #${ch.name} (${i + 1}/${channels.length})${page > 1 ? ` p${page}` : ''}…`);
+            const params = { channel: ch.id, oldest, limit: '200' };
+            if (cursor) params.cursor = cursor;
+            const data = await slackGet('conversations.history', params);
+            const topLevel = data.messages || [];
+            console.log(`[Slack] #${ch.name} p${page}: ${topLevel.length} msgs`);
+
+            // Top-level mentions
+            topLevel
+              .filter(m => mentionsHandle(m.text) && m.type === 'message' && !m.subtype)
+              .forEach(m => allMatches.push({ ...m, _channel: ch, _inThread: false }));
+
+            // Check thread replies for any message that has replies
+            const threaded = topLevel.filter(m => (m.reply_count || 0) > 0);
+            console.log(`[Slack] #${ch.name} p${page}: ${threaded.length} threaded msgs`);
+            for (const parent of threaded) {
+              try {
+                // No oldest filter here — fetch all replies in the thread
+                const rd = await slackGet('conversations.replies', { channel: ch.id, ts: parent.ts, limit: '200' });
+                // replies[0] is the parent itself — skip it
+                const replies = (rd.messages || []).slice(1);
+                const matchCount = replies.filter(m => mentionsHandle(m.text)).length;
+                console.log(`[Slack] #${ch.name} thread ts=${parent.ts}: ${replies.length} replies, matches=${matchCount}`);
+                replies
+                  .filter(m => mentionsHandle(m.text))
+                  .forEach(m => allMatches.push({ ...m, _channel: ch, _inThread: true, _parentTs: parent.ts }));
+              } catch (e) {
+                scanErrors.push(`#${ch.name} thread ${parent.ts}: ${e.message}`);
+                console.warn(`[Slack] thread error #${ch.name} ts=${parent.ts}:`, e.message);
+              }
+            }
+
+            setMessages([...allMatches].sort((a, b) => parseFloat(b.ts) - parseFloat(a.ts)));
+            cursor = data.response_metadata?.next_cursor;
+          } while (cursor);
+        } catch (e) {
+          scanErrors.push(`#${ch.name}: ${e.message}`);
+        }
+      }
+
+      setErrors(scanErrors);
+      setMessages([...allMatches].sort((a, b) => parseFloat(b.ts) - parseFloat(a.ts)));
+    } catch (err) {
+      setErrors([err.message]);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => { scanChannels(); }, [scanChannels]);
+
+  const filtered = useMemo(() => {
+    if (!search.trim()) return messages;
+    const q = search.toLowerCase();
+    return messages.filter(m =>
+      slackStripMarkup(m.text).toLowerCase().includes(q) ||
+      m._channel?.name?.toLowerCase().includes(q)
+    );
+  }, [messages, search]);
+
+  const formatTs = (ts) => {
+    try { return format(new Date(parseFloat(ts) * 1000), 'MMM d, h:mm a'); }
+    catch { return ''; }
+  };
+
+  const permalink = (ch, ts, parentTs) => {
+    const p = ts.replace('.', '');
+    const base = `https://${SLACK_WORKSPACE}.slack.com/archives/${ch.id}/p${p}`;
+    // Thread replies need ?thread_ts= to open directly in the thread
+    if (parentTs) return `${base}?thread_ts=${parentTs}&cid=${ch.id}`;
+    return base;
+  };
+
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div
+        className="modal-content"
+        onClick={e => e.stopPropagation()}
+        style={{ maxWidth: '820px', width: '95vw', maxHeight: '90vh', display: 'flex', flexDirection: 'column', padding: 0 }}
+      >
+        {/* Header */}
+        <div className="modal-header" style={{ padding: '1rem 1.25rem', flexShrink: 0 }}>
+          <h2 style={{ fontSize: '1.1rem', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+            <MessageSquare size={18} />
+            @{SLACK_SEARCH_HANDLE}
+            {messages.length > 0 && (
+              <span style={{ fontSize: '0.78rem', fontWeight: 400, color: 'var(--text-muted)' }}>
+                {messages.length} mention{messages.length !== 1 ? 's' : ''}{loading ? '…' : ' · last 30 days'}
+              </span>
+            )}
+          </h2>
+          <div style={{ display: 'flex', gap: '0.4rem', alignItems: 'center' }}>
+            <button onClick={scanChannels} title="Refresh"
+              style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-muted)', display: 'flex', alignItems: 'center' }}>
+              <RefreshCw size={15} className={loading ? 'spin' : ''} />
+            </button>
+            <button onClick={onClose}
+              style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-muted)', display: 'flex', alignItems: 'center' }}>
+              <X size={20} />
+            </button>
+          </div>
+        </div>
+
+        {/* Errors */}
+        {errors.length > 0 && (
+          <div style={{ margin: '0 1.25rem 0.5rem', padding: '0.5rem 0.75rem', background: '#fef2f2', color: '#dc2626', borderRadius: '6px', fontSize: '0.78rem', flexShrink: 0 }}>
+            <AlertCircle size={13} style={{ verticalAlign: 'middle', marginRight: '4px' }} />
+            {errors.map((e, i) => <div key={i}>{e}</div>)}
+          </div>
+        )}
+
+        {/* Search */}
+        <div style={{ padding: '0 1.25rem 0.75rem', flexShrink: 0 }}>
+          <input
+            className="form-input"
+            value={search}
+            onChange={e => setSearch(e.target.value)}
+            placeholder="Filter by message or channel…"
+            style={{ width: '100%', fontSize: '0.85rem' }}
+          />
+        </div>
+
+        {/* Body */}
+        <div style={{ overflow: 'auto', flex: 1, padding: '0 1.25rem 1.25rem' }}>
+          {/* Status bar shown while scanning */}
+          {loading && (
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', padding: '0.4rem 0', marginBottom: '0.5rem', color: 'var(--text-muted)', fontSize: '0.82rem' }}>
+              <Loader2 size={14} className="spin" />
+              <span>{status}</span>
+            </div>
+          )}
+          {/* Empty state only when done scanning and nothing found */}
+          {!loading && filtered.length === 0 ? (
+            <div style={{ textAlign: 'center', padding: '3rem', color: 'var(--text-muted)', fontSize: '0.9rem' }}>
+              No mentions found in the last 30 days
+            </div>
+          ) : filtered.length > 0 ? (
+            filtered.map((msg, idx) => {
+              const ch = msg._channel;
+              const preview = slackStripMarkup(msg.text);
+              const time = formatTs(msg.ts);
+              const link = permalink(ch, msg.ts, msg._parentTs);
+
+              return (
+                <div key={`${msg.ts}-${idx}`} style={{
+                  padding: '0.75rem 0',
+                  borderBottom: '1px solid var(--border-color)',
+                  display: 'flex', flexDirection: 'column', gap: '0.35rem',
+                }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                    <span style={{
+                      display: 'inline-flex', alignItems: 'center', gap: '0.2rem',
+                      padding: '0.1rem 0.45rem', borderRadius: '4px', fontSize: '0.72rem', fontWeight: 600,
+                      background: ch?.is_private ? '#fef3c7' : '#eff6ff',
+                      color: ch?.is_private ? '#b45309' : '#1d4ed8',
+                    }}>
+                      {ch?.is_private ? <Shield size={10} /> : <Hash size={10} />}
+                      {ch?.name || ch?.id}
+                    </span>
+                    <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)', flex: 1 }}>
+                      {time}
+                      {msg._inThread && (
+                        <span style={{ marginLeft: '0.4rem', background: 'var(--bg-hover)', padding: '0.1rem 0.35rem', borderRadius: '3px' }}>
+                          thread reply
+                        </span>
+                      )}
+                    </span>
+                    <a
+                      href={link}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      style={{
+                        fontSize: '0.75rem', fontWeight: 600,
+                        color: 'var(--accent-primary)', textDecoration: 'none',
+                        padding: '0.2rem 0.5rem', borderRadius: '4px',
+                        border: '1px solid var(--accent-primary)',
+                        whiteSpace: 'nowrap',
+                      }}
+                    >
+                      Open Thread
+                    </a>
+                  </div>
+                  <p style={{
+                    margin: 0, fontSize: '0.83rem', color: 'var(--text-secondary)',
+                    overflow: 'hidden', display: '-webkit-box',
+                    WebkitLineClamp: 2, WebkitBoxOrient: 'vertical',
+                  }}>
+                    {preview}
+                  </p>
+                </div>
+              );
+            })
+          ) : null}
+        </div>
+      </div>
+    </div>
+  );
+};
+
 // ─── DRIVE SHEET MODAL ──────────────────────────────────
+// ─── LINK / CREATE SHEET MODAL ──────────────────────────────────
+const LinkSheetModal = ({ deptName, deptId, currentSheets = [], onClose, onDone, onGlobalLoading }) => {
+  const [mode, setMode] = useState('link');
+  const [sheetUrl, setSheetUrl] = useState('');
+  const [sheetLabel, setSheetLabel] = useState('');
+  const [newSheetName, setNewSheetName] = useState(`${deptName} Roster Db`);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+  const [removingUrl, setRemovingUrl] = useState(null);
+  // Local copy so the list updates immediately after removal without waiting for parent reload
+  const [sheets, setSheets] = useState(currentSheets);
+
+  const appendSheetToDept = async (sheetId) => {
+    const { appendSheetIdToDept } = await import('./lib/sheetsApi');
+    await appendSheetIdToDept(deptId, sheetId);
+  };
+
+  const handleRemoveSheet = async (url) => {
+    if (!window.confirm('Remove this sheet from the department?')) return;
+    setRemovingUrl(url);
+    try {
+      const { removeSheetFromDept, extractSpreadsheetId } = await import('./lib/sheetsApi');
+      const sheetId = extractSpreadsheetId(url) || url;
+      await removeSheetFromDept(deptId, sheetId);
+      // Update local list immediately so the UI reflects the change right away
+      setSheets(prev => prev.filter(s => s.url !== url));
+      // Refresh parent departments state but keep modal open
+      onDone?.(false);
+    } catch (err) {
+      alert('Failed to remove sheet: ' + err.message);
+    } finally {
+      setRemovingUrl(null);
+    }
+  };
+
+  const handleLinkSheet = async () => {
+    if (!sheetUrl.trim()) return;
+    onClose();
+    onGlobalLoading?.(`Linking sheet to ${deptName}...`);
+    try {
+      const { extractSpreadsheetId } = await import('./lib/sheetsApi');
+      const id = extractSpreadsheetId(sheetUrl.trim());
+      console.log('[LinkSheet] extracted id:', id, 'from url:', sheetUrl.trim());
+      if (!id) throw new Error('Invalid Google Sheets URL');
+      console.log('[LinkSheet] calling appendSheetToDept with deptId:', deptId, 'sheetId:', id);
+      await appendSheetToDept(id);
+      console.log('[LinkSheet] success');
+      onDone?.();
+    } catch (err) {
+      console.error('[LinkSheet] failed:', err);
+      alert('Failed to link sheet: ' + err.message);
+    } finally {
+      onGlobalLoading?.(null);
+    }
+  };
+
+  const handleCreateSheet = async () => {
+    if (!newSheetName.trim()) return;
+    onClose();
+    onGlobalLoading?.(`Creating "${newSheetName.trim()}"...`);
+    try {
+      const { createDriveSheetForDept } = await import('./lib/api');
+      const result = await createDriveSheetForDept(deptId, newSheetName.trim(), []);
+      await appendSheetToDept(result.spreadsheetId);
+      onDone?.();
+    } catch (err) {
+      console.error('Create sheet failed', err);
+    } finally {
+      onGlobalLoading?.(null);
+    }
+  };
+
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div className="modal-content" onClick={e => e.stopPropagation()} style={{ maxWidth: '480px' }}>
+        <div className="modal-header">
+          <h2 style={{ fontSize: '1.1rem', fontWeight: 600 }}>
+            <TableIcon size={18} style={{ verticalAlign: 'middle', marginRight: '0.5rem' }} />
+            Manage Sheets — {deptName}
+          </h2>
+          <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-muted)' }}>
+            <X size={20} />
+          </button>
+        </div>
+
+        {/* Linked sheets list with remove */}
+        {sheets.length > 0 && (
+          <div style={{ marginBottom: '1rem' }}>
+            <p style={{ fontSize: '0.75rem', fontWeight: 600, color: 'var(--text-muted)', marginBottom: '0.5rem', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+              Linked Sheets
+            </p>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.4rem' }}>
+              {sheets.map((s, i) => (
+                <div key={i} style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', padding: '0.5rem 0.75rem', borderRadius: '8px', background: 'var(--bg-secondary)', border: '1px solid var(--border-color)' }}>
+                  <TableIcon size={14} style={{ color: 'var(--accent-primary)', flexShrink: 0 }} />
+                  <a href={s.url} target="_blank" rel="noopener noreferrer"
+                    style={{ fontSize: '0.8rem', color: 'var(--accent-primary)', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    {s.label || `Sheet ${i + 1}`}
+                  </a>
+                  <button
+                    onClick={() => handleRemoveSheet(s.url)}
+                    disabled={removingUrl === s.url}
+                    style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--accent-danger)', padding: '0.1rem', display: 'flex', alignItems: 'center', flexShrink: 0 }}
+                    title="Remove sheet"
+                  >
+                    {removingUrl === s.url ? <Loader2 size={14} className="spin" /> : <X size={14} />}
+                  </button>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Mode toggle */}
+        <div style={{ display: 'flex', gap: '0.5rem', margin: '1rem 0' }}>
+          <button
+            onClick={() => setMode('link')}
+            style={{
+              flex: 1, padding: '0.6rem', borderRadius: '8px', border: '1px solid',
+              borderColor: mode === 'link' ? 'var(--accent-primary)' : 'var(--border-color)',
+              background: mode === 'link' ? 'var(--accent-primary)' : 'var(--bg-secondary)',
+              color: mode === 'link' ? '#fff' : 'var(--text-primary)',
+              fontSize: '0.85rem', fontWeight: 600, cursor: 'pointer',
+            }}
+          >
+            Paste Existing Link
+          </button>
+          <button
+            onClick={() => setMode('create')}
+            style={{
+              flex: 1, padding: '0.6rem', borderRadius: '8px', border: '1px solid',
+              borderColor: mode === 'create' ? 'var(--accent-primary)' : 'var(--border-color)',
+              background: mode === 'create' ? 'var(--accent-primary)' : 'var(--bg-secondary)',
+              color: mode === 'create' ? '#fff' : 'var(--text-primary)',
+              fontSize: '0.85rem', fontWeight: 600, cursor: 'pointer',
+            }}
+          >
+            Create New Sheet
+          </button>
+        </div>
+
+        {mode === 'link' && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+            <input
+              className="form-input"
+              value={sheetUrl}
+              onChange={e => setSheetUrl(e.target.value)}
+              placeholder="Paste Google Sheets URL..."
+              style={{ fontSize: '0.85rem' }}
+            />
+            <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: '0.5rem' }}>
+              <button className="btn btn-primary" onClick={handleLinkSheet} disabled={!sheetUrl.trim()}>
+                <PlusCircle size={14} /> Link Sheet
+              </button>
+            </div>
+          </div>
+        )}
+
+        {mode === 'create' && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+            <input
+              className="form-input"
+              value={newSheetName}
+              onChange={e => setNewSheetName(e.target.value)}
+              placeholder="Sheet name..."
+              style={{ fontSize: '0.85rem' }}
+            />
+            <p style={{ fontSize: '0.75rem', color: 'var(--text-muted)', margin: 0 }}>
+              Creates a new Google Spreadsheet in your Drive and links it to {deptName}.
+            </p>
+            <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: '0.5rem' }}>
+              <button className="btn btn-primary" onClick={handleCreateSheet} disabled={!newSheetName.trim()}>
+                <PlusCircle size={14} /> Create & Link
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+};
+
 const DriveSheetModal = ({ deptName, deptId, onClose, onCreated }) => {
   const [tabs, setTabs] = useState([{ name: '', source: 'manual', headers: '', data: '', url: '', importing: false, imported: false }]);
   const [prompt, setPrompt] = useState('');
@@ -1506,7 +4388,7 @@ const AdminManager = ({ onClose, departments, userRole }) => {
 };
 
 // 3b. DEPARTMENT MANAGER MODAL
-const DepartmentManager = ({ onClose, onDepartmentCreated }) => {
+const DepartmentManager = ({ onClose, onDepartmentCreated, onGlobalLoading }) => {
   const [departments, setDepartments] = useState([]);
   const [loading, setLoading] = useState(true);
   const [newName, setNewName] = useState('');
@@ -1534,19 +4416,17 @@ const DepartmentManager = ({ onClose, onDepartmentCreated }) => {
   const handleCreate = async (e) => {
     e.preventDefault();
     if (!newName.trim()) return;
-    setSaving(true);
-    setError('');
+    const name = newName.trim();
+    const slug = newSlug.trim() || name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
+    onClose();
+    onGlobalLoading?.(`Creating department "${name}"...`);
     try {
-      const slug = newSlug.trim() || newName.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
-      await createDepartment(newName.trim(), slug);
-      setNewName('');
-      setNewSlug('');
-      await loadDepartments();
+      await createDepartment(name, slug);
       if (onDepartmentCreated) onDepartmentCreated();
     } catch (err) {
-      setError(err.message || 'Failed to create department');
+      console.error('Failed to create department', err);
     } finally {
-      setSaving(false);
+      onGlobalLoading?.(null);
     }
   };
 
@@ -2843,9 +5723,14 @@ function AuthenticatedApp({ onLogout }) {
   const [userProfile, setUserProfile] = useState(null);
   const [showGenerator, setShowGenerator] = useState(false);
   const [showDriveSheetModal, setShowDriveSheetModal] = useState(false);
+  const [showDevRevModal, setShowDevRevModal] = useState(false);
+  const [showSlackModal, setShowSlackModal] = useState(false);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [showAdminManager, setShowAdminManager] = useState(false);
   const [showDeptManager, setShowDeptManager] = useState(false);
+  const [showLinkSheet, setShowLinkSheet] = useState(false);
+  const [globalLoading, setGlobalLoading] = useState(null);
+  const [dashboardKey, setDashboardKey] = useState(0);
   const [currentDate, setCurrentDate] = useState(new Date());
 
   // Department state
@@ -3114,6 +5999,21 @@ function AuthenticatedApp({ onLogout }) {
 
   return (
     <div className="app-layout">
+      {/* Global Loading Overlay */}
+      {globalLoading && (
+        <div style={{
+          position: 'fixed', inset: 0, zIndex: 9999, background: 'rgba(0,0,0,0.4)',
+          display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: '1rem',
+        }}>
+          <div style={{
+            background: 'var(--bg-card)', borderRadius: '16px', padding: '2rem 3rem',
+            boxShadow: 'var(--shadow-lg)', textAlign: 'center',
+          }}>
+            <Loader2 size={36} className="spin" style={{ color: 'var(--accent-primary)', marginBottom: '0.75rem' }} />
+            <p style={{ fontSize: '0.9rem', fontWeight: 500, color: 'var(--text-primary)', margin: 0 }}>{globalLoading}</p>
+          </div>
+        </div>
+      )}
       {/* Toast */}
       {toast && <Toast message={toast.message} type={toast.type} onClose={() => setToast(null)} />}
 
@@ -3181,55 +6081,62 @@ function AuthenticatedApp({ onLogout }) {
         </button>
 
         <nav className="sidebar-nav" style={{ marginTop: '1rem' }}>
-          <button
-            className={`nav-item ${view === 'dashboard' ? 'active' : ''}`}
-            onClick={() => setView('dashboard')}
-            title="Dashboard"
-          >
-            <LayoutGrid size={20} /> {!sidebarCollapsed && 'Overview'}
-          </button>
-          <button
-            className={`nav-item ${view === 'roster' ? 'active' : ''}`}
-            onClick={() => setView('roster')}
-            title="Roster"
-          >
-            <Calendar size={20} /> {!sidebarCollapsed && 'Roster'}
-          </button>
-          <button
-            className={`nav-item ${view === 'summary' ? 'active' : ''}`}
-            onClick={() => setView('summary')}
-            title="Reports"
-          >
-            <PieChart size={20} /> {!sidebarCollapsed && 'Reports'}
-          </button>
+          {(() => {
+            const dept = departments.find(d => d.id === selectedDepartmentId);
+            const isSheetsMode = dept?.features?.includes('google_sheets_enable');
 
-          <div style={{ height: '1px', background: 'var(--border-color)', margin: '1rem 0' }} />
+            if (isSheetsMode) {
+              return (
+                <>
+                  <button className={`nav-item ${view === 'dashboard' ? 'active' : ''}`} onClick={() => setView('dashboard')} title="Dashboard">
+                    <LayoutGrid size={20} /> {!sidebarCollapsed && 'Dashboard'}
+                  </button>
+                  <button className={`nav-item ${view === 'ps-metrics' ? 'active' : ''}`} onClick={() => setView('ps-metrics')} title="Productivity & Team Metrics">
+                    <PieChart size={20} /> {!sidebarCollapsed && 'Productivity & Team'}
+                  </button>
+                  <button className={`nav-item ${view === 'ps-health' ? 'active' : ''}`} onClick={() => setView('ps-health')} title="Team Health & Engagement">
+                    <Users size={20} /> {!sidebarCollapsed && 'Team Health'}
+                  </button>
+                  <button className={`nav-item ${view === 'ps-quality' ? 'active' : ''}`} onClick={() => setView('ps-quality')} title="Project Quality & Impact">
+                    <ShieldCheck size={20} /> {!sidebarCollapsed && 'Project Quality'}
+                  </button>
+                  <button className={`nav-item ${view === 'ps-ownership' ? 'active' : ''}`} onClick={() => setView('ps-ownership')} title="PS Ownership & Projects">
+                    <Building2 size={20} /> {!sidebarCollapsed && 'PS Ownership'}
+                  </button>
+                </>
+              );
+            }
 
-          <button
-            className={`nav-item ${view === 'requests' ? 'active' : ''}`}
-            onClick={() => setView('requests')}
-            title="Requests"
-          >
-            <FileText size={20} /> {!sidebarCollapsed && 'Requests'}
-          </button>
-          {userRole?.canEdit && (
-            <button
-              className={`nav-item ${view === 'review' ? 'active' : ''}`}
-              onClick={() => setView('review')}
-              title="Review"
-            >
-              <CheckSquare size={20} /> {!sidebarCollapsed && 'Approvals'}
-            </button>
-          )}
-          {isAdmin && selectedDepartmentId && (departments.find(d => d.id === selectedDepartmentId)?.features || []).includes('auto_bucket') && (
-            <button
-              className={`nav-item ${view === 'auto-enablement' ? 'active' : ''}`}
-              onClick={() => setView('auto-enablement')}
-              title="Auto Bucket Mgmt"
-            >
-              <Clock size={20} /> {!sidebarCollapsed && 'Auto Bucket Mgmt'}
-            </button>
-          )}
+            return (
+              <>
+                <button className={`nav-item ${view === 'dashboard' ? 'active' : ''}`} onClick={() => setView('dashboard')} title="Dashboard">
+                  <LayoutGrid size={20} /> {!sidebarCollapsed && 'Overview'}
+                </button>
+                <button className={`nav-item ${view === 'roster' ? 'active' : ''}`} onClick={() => setView('roster')} title="Roster">
+                  <Calendar size={20} /> {!sidebarCollapsed && 'Roster'}
+                </button>
+                <button className={`nav-item ${view === 'summary' ? 'active' : ''}`} onClick={() => setView('summary')} title="Reports">
+                  <PieChart size={20} /> {!sidebarCollapsed && 'Reports'}
+                </button>
+
+                <div style={{ height: '1px', background: 'var(--border-color)', margin: '1rem 0' }} />
+
+                <button className={`nav-item ${view === 'requests' ? 'active' : ''}`} onClick={() => setView('requests')} title="Requests">
+                  <FileText size={20} /> {!sidebarCollapsed && 'Requests'}
+                </button>
+                {userRole?.canEdit && (
+                  <button className={`nav-item ${view === 'review' ? 'active' : ''}`} onClick={() => setView('review')} title="Review">
+                    <CheckSquare size={20} /> {!sidebarCollapsed && 'Approvals'}
+                  </button>
+                )}
+                {isAdmin && selectedDepartmentId && (dept?.features || []).includes('auto_bucket') && (
+                  <button className={`nav-item ${view === 'auto-enablement' ? 'active' : ''}`} onClick={() => setView('auto-enablement')} title="Auto Bucket Mgmt">
+                    <Clock size={20} /> {!sidebarCollapsed && 'Auto Bucket Mgmt'}
+                  </button>
+                )}
+              </>
+            );
+          })()}
         </nav>
 
         <div className="sidebar-footer">
@@ -3368,12 +6275,22 @@ function AuthenticatedApp({ onLogout }) {
 
         {/* Main Content */}
         <main className="main-content" style={{ padding: '0', position: 'relative' }}>
-          {view === 'dashboard' && (
+          {view === 'dashboard' && (() => {
+            const dept = departments.find(d => d.id === selectedDepartmentId);
+            const isSheetsEnabled = dept?.features?.includes('google_sheets_enable');
+            return (
             <Dashboard
+              key={dashboardKey}
               rosterData={allTeamsData}
               currentDate={currentDate}
               onChangeDate={handleDateChange}
               loading={loading}
+              deptName={dept?.name || ''}
+              isSheetsEnabled={isSheetsEnabled}
+              onOpenDevRev={() => setShowDevRevModal(true)}
+              onOpenSlack={() => setShowSlackModal(true)}
+              sheets={dept?.sheets || []}
+              teamConfig={getTeamConfig(dept)}
               headerAction={
                 <div style={{ display: 'flex', gap: '1rem', alignItems: 'center' }}>
                   <TeamSelector teams={teams} selectedTeams={selectedTeams} setSelectedTeams={setSelectedTeams} />
@@ -3382,9 +6299,14 @@ function AuthenticatedApp({ onLogout }) {
                     const isSheetsEnabled = dept?.features?.includes('google_sheets_enable');
                     if (isSheetsEnabled) {
                       return (
-                        <button className="btn btn-primary" onClick={() => setShowDriveSheetModal(true)}>
-                          <PlusCircle size={16} /> Create Drive Sheet
-                        </button>
+                        <>
+                          <button className="btn btn-secondary" onClick={() => setShowSlackModal(true)} style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                            <MessageSquare size={16} /> Slack Threads
+                          </button>
+                          <button className="btn btn-primary" onClick={() => setShowLinkSheet(true)} style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                            <PlusCircle size={16} /> Add Sheet
+                          </button>
+                        </>
                       );
                     }
                     return (
@@ -3396,7 +6318,8 @@ function AuthenticatedApp({ onLogout }) {
                 </div>
               }
             />
-          )}
+            );
+          })()}
           {view === 'roster' && (
             <RosterTable
               currentUser={userProfile?.name}
@@ -3457,6 +6380,36 @@ function AuthenticatedApp({ onLogout }) {
               departments={departments}
             />
           )}
+
+          {/* PS Dashboard pages — shared by PS-POS and PS-Enterprise via teamConfig */}
+          {view === 'ps-metrics' && (() => {
+            const dept = departments.find(d => d.id === selectedDepartmentId);
+            return <PSProductivityMetrics teamConfig={getTeamConfig(dept)} />;
+          })()}
+          {view === 'ps-health' && (() => {
+            const dept = departments.find(d => d.id === selectedDepartmentId);
+            return <PSTeamHealth teamConfig={getTeamConfig(dept)} departmentId={dept?.id} />;
+          })()}
+          {view === 'ps-quality' && (() => {
+            const dept = departments.find(d => d.id === selectedDepartmentId);
+            return <PSProjectQuality sheets={dept?.sheets || []} teamConfig={getTeamConfig(dept)} />;
+          })()}
+          {view === 'ps-ownership' && (() => {
+            const dept = departments.find(d => d.id === selectedDepartmentId);
+            return (
+              <div className="dashboard-container" style={{ padding: '1.5rem' }}>
+                <h2 style={{ fontSize: '1.25rem', fontWeight: 600, marginBottom: '0.5rem' }}>PS Ownership & Projects</h2>
+                <p style={{ fontSize: '0.85rem', color: 'var(--text-muted)', marginBottom: '1rem' }}>Track work items, projects, and team threads.</p>
+                <DevRevOverview
+                  deptName={dept?.name || ''}
+                  onLoadMore={() => setShowDevRevModal(true)}
+                  onOpenSlack={() => setShowSlackModal(true)}
+                  sheets={dept?.sheets || []}
+                  teamConfig={getTeamConfig(dept)}
+                />
+              </div>
+            );
+          })()}
         </main>
       </div>
 
@@ -3485,6 +6438,8 @@ function AuthenticatedApp({ onLogout }) {
           />
         );
       })()}
+      {showDevRevModal && <DevRevTicketsModal onClose={() => setShowDevRevModal(false)} />}
+      {showSlackModal && <SlackThreadsModal onClose={() => setShowSlackModal(false)} />}
       {showDeleteConfirm && (
         <DeleteConfirm
           onClose={() => setShowDeleteConfirm(false)}
@@ -3509,8 +6464,26 @@ function AuthenticatedApp({ onLogout }) {
         <DepartmentManager
           onClose={() => setShowDeptManager(false)}
           onDepartmentCreated={() => loadDepartments()}
+          onGlobalLoading={setGlobalLoading}
         />
       )}
+      {showLinkSheet && (() => {
+        const dept = departments.find(d => d.id === selectedDepartmentId);
+        return (
+          <LinkSheetModal
+            deptName={dept?.name || ''}
+            deptId={selectedDepartmentId}
+            currentSheets={dept?.sheets || []}
+            onClose={() => setShowLinkSheet(false)}
+            onDone={(closeModal = true) => {
+              loadDepartments();
+              setDashboardKey(k => k + 1);
+              if (closeModal) setShowLinkSheet(false);
+            }}
+            onGlobalLoading={setGlobalLoading}
+          />
+        );
+      })()}
 
       {/* Mobile Bottom Navigation */}
       <nav className="mobile-nav">
