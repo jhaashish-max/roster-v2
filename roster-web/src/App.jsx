@@ -111,6 +111,8 @@ const PS_ENT_TEAM_CONFIG = {
   slackSubteamId: PS_ENT_SLACK_SUBTEAM_ID,
   slackChannelIds: PS_ENT_SLACK_CHANNEL_IDS,
   cacheKeySuffix: 'ent',
+  // Members who belong to PS-POS and should not appear on this board
+  excludeMembers: ['astha bhushan'],
 };
 // Returns the correct team config based on department name/slug
 const getTeamConfig = (dept) => {
@@ -1040,7 +1042,7 @@ const PSProjectQuality = ({ sheets = [], teamConfig = PS_POS_TEAM_CONFIG }) => {
     })();
   }, []);
 
-  // Build revenue map from "Revenue" tab(s)
+  // Build revenue map from "Revenue" tab(s) — only from explicitly named revenue columns
   const revenueMap = useMemo(() => {
     const map = {};
     const revTabs = allTabs.filter(t => t.name.toLowerCase().includes('revenue'));
@@ -1049,26 +1051,11 @@ const PSProjectQuality = ({ sheets = [], teamConfig = PS_POS_TEAM_CONFIG }) => {
       tab.headers.forEach((h, i) => { hIdx[h.toLowerCase().trim()] = i; });
       const nameIdx = hIdx['project'] ?? hIdx['project name'] ?? hIdx['name'] ?? hIdx['merchant'] ?? 0;
       const revIdx = hIdx['revenue'] ?? hIdx['amount'] ?? hIdx['value'] ?? hIdx['mrr'] ?? hIdx['arr'] ?? -1;
-      if (revIdx < 0) {
-        // If no named revenue column, try to find the first numeric column after name
-        for (let i = 1; i < tab.headers.length; i++) {
-          if (i !== nameIdx) {
-            const sample = tab.data[0]?.[i];
-            if (sample && !isNaN(String(sample).replace(/[^0-9.-]/g, ''))) {
-              tab.data.forEach(row => {
-                const name = String(row[nameIdx] || '').trim().toLowerCase();
-                if (name) map[name] = (map[name] || 0) + (parseFloat(String(row[i] || '0').replace(/[^0-9.-]/g, '')) || 0);
-              });
-              break;
-            }
-          }
-        }
-      } else {
-        tab.data.forEach(row => {
-          const name = String(row[nameIdx] || '').trim().toLowerCase();
-          if (name) map[name] = (map[name] || 0) + (parseFloat(String(row[revIdx] || '0').replace(/[^0-9.-]/g, '')) || 0);
-        });
-      }
+      if (revIdx < 0) continue; // no recognized revenue column — skip to avoid summing wrong columns
+      tab.data.forEach(row => {
+        const name = String(row[nameIdx] || '').trim().toLowerCase();
+        if (name) map[name] = (map[name] || 0) + (parseFloat(String(row[revIdx] || '0').replace(/[^0-9.-]/g, '')) || 0);
+      });
     }
     return map;
   }, [allTabs]);
@@ -1106,19 +1093,50 @@ const PSProjectQuality = ({ sheets = [], teamConfig = PS_POS_TEAM_CONFIG }) => {
   const revTabTotal = useMemo(() => Object.values(revenueMap).reduce((s, v) => s + v, 0), [revenueMap]);
   const projectRevTotal = projects.reduce((s, p) => s + p.revenue, 0);
   const totalRevenue = projectRevTotal > 0 ? projectRevTotal : revTabTotal;
-  const activeProjects = projects.filter(p => ['active', 'in progress', 'on track'].includes(p.status.toLowerCase())).length;
-  const completedProjects = projects.filter(p => ['completed', 'done', 'delivered'].includes(p.status.toLowerCase())).length;
-  const atRiskProjects = projects.filter(p => ['at risk', 'blocked', 'delayed'].includes(p.status.toLowerCase())).length;
+  // Projects with a non-empty status — use as denominator for percentages
+  const knownProjects = projects.filter(p => p.status.trim() !== '');
 
-  const formatCurrency = (n) => n >= 10000000 ? `₹${(n / 10000000).toFixed(1)}Cr` : n >= 100000 ? `₹${(n / 100000).toFixed(1)}L` : n > 0 ? `₹${n.toLocaleString('en-IN')}` : '—';
+  // Use keyword-based matching to handle verbose/freeform status values
+  const isProjectCompleted = (s) => {
+    const l = s.toLowerCase();
+    return l.includes('went live') || l.includes('gone live') || l.includes('already live') ||
+           ['completed', 'done', 'delivered', 'live'].includes(l);
+  };
+  const isProjectActive = (s) => {
+    const l = s.toLowerCase();
+    if (isProjectCompleted(s)) return false;
+    return ['on track', 'in progress', 'development', 'wip', 'qa', 'uat',
+            'under testing', 'testing', 'frontend dev', 'active'].some(k => l.includes(k));
+  };
+  const isProjectAtRisk = (s) => {
+    const l = s.toLowerCase();
+    return ['blocked', 'delayed', 'at risk', 'following up'].some(k => l.includes(k));
+  };
+
+  const activeProjects    = knownProjects.filter(p => isProjectActive(p.status)).length;
+  const completedProjects = knownProjects.filter(p => isProjectCompleted(p.status)).length;
+  const atRiskProjects    = knownProjects.filter(p => isProjectAtRisk(p.status)).length;
+
+  const formatCurrency = (n) => {
+    if (!n || n <= 0) return '—';
+    if (n >= 1e15) return `₹${Math.round(n / 1e15)}KCr`;   // ≥ 10^15 → shows e.g. ₹75KCr
+    if (n >= 1e12) return `₹${Math.round(n / 1e12)}LCr`;   // ≥ Lakh Crore
+    if (n >= 1e10) return `₹${Math.round(n / 1e10)}KCr`;   // ≥ 1000 Cr
+    if (n >= 1e7)  return `₹${Math.round(n / 1e7)}Cr`;
+    if (n >= 1e5)  return `₹${Math.round(n / 1e5)}L`;
+    return `₹${n.toLocaleString('en-IN')}`;
+  };
 
   const statusColor = (s) => {
-    const l = s.toLowerCase();
-    if (['active', 'on track', 'live'].includes(l)) return { bg: '#d1fae5', color: '#059669', label: s };
-    if (['in progress', 'wip'].includes(l)) return { bg: '#dbeafe', color: '#2563eb', label: s };
-    if (['at risk', 'blocked', 'delayed'].includes(l)) return { bg: '#fef2f2', color: '#dc2626', label: s };
-    if (['completed', 'done', 'delivered'].includes(l)) return { bg: '#f3f4f6', color: '#6b7280', label: s };
-    if (['planned', 'upcoming'].includes(l)) return { bg: '#ede9fe', color: '#7c3aed', label: s };
+    const l = (s || '').toLowerCase();
+    // "Went Live" and variants = delivered (grey-green)
+    if (l.includes('went live') || l.includes('already live') || l.includes('gone live')) return { bg: '#d1fae5', color: '#059669', label: s };
+    if (['active', 'on track', 'live'].includes(l) || l.includes('on track')) return { bg: '#d1fae5', color: '#059669', label: s };
+    if (l.includes('in progress') || l.includes('wip') || l.includes('development') || l.includes('uat') || l.includes('qa') || l.includes('testing')) return { bg: '#dbeafe', color: '#2563eb', label: s };
+    if (l.includes('blocked') || l.includes('delayed') || l.includes('at risk') || l.includes('following up')) return { bg: '#fef2f2', color: '#dc2626', label: s };
+    if (['completed', 'done', 'delivered'].includes(l)) return { bg: '#d1fae5', color: '#059669', label: s };
+    if (l.includes('not yet started') || l.includes('not started') || l.includes('planned') || l.includes('upcoming')) return { bg: '#ede9fe', color: '#7c3aed', label: s };
+    if (l.includes('discussion') || l.includes('feedback')) return { bg: '#fef3c7', color: '#d97706', label: s };
     return { bg: '#f3f4f6', color: '#6b7280', label: s };
   };
 
@@ -1217,20 +1235,34 @@ const PSProjectQuality = ({ sheets = [], teamConfig = PS_POS_TEAM_CONFIG }) => {
               )}
             </div>
 
-            {/* Revenue by Source */}
+            {/* Projects by Category (falls back to count when no per-project revenue) */}
             <div style={{ background: 'var(--bg-card)', borderRadius: '12px', border: '1px solid var(--border-color)', padding: '1rem' }}>
-              <h3 style={{ fontSize: '0.85rem', fontWeight: 600, marginBottom: '1rem', color: 'var(--text-primary)' }}>Revenue by Category</h3>
+              <h3 style={{ fontSize: '0.85rem', fontWeight: 600, marginBottom: '1rem', color: 'var(--text-primary)' }}>Projects by Category</h3>
               <div style={{ display: 'flex', flexDirection: 'column', gap: '0.6rem' }}>
                 {(() => {
+                  // Build per-source stats: count + revenue
                   const srcMap = {};
-                  projects.forEach(p => { const s = p.source || 'Other'; srcMap[s] = (srcMap[s] || 0) + p.revenue; });
-                  return Object.entries(srcMap).filter(([,v]) => v > 0).sort(([,a],[,b]) => b - a).map(([src, rev], i) => {
-                    const pct = totalRevenue > 0 ? Math.round((rev / totalRevenue) * 100) : 0;
+                  projects.forEach(p => {
+                    const s = p.source || 'Other';
+                    if (!srcMap[s]) srcMap[s] = { count: 0, revenue: 0 };
+                    srcMap[s].count++;
+                    srcMap[s].revenue += p.revenue;
+                  });
+                  const hasRevenue = Object.values(srcMap).some(v => v.revenue > 0);
+                  const sorted = Object.entries(srcMap).sort(([,a],[,b]) =>
+                    hasRevenue ? b.revenue - a.revenue : b.count - a.count
+                  );
+                  const maxVal = Math.max(...sorted.map(([,v]) => hasRevenue ? v.revenue : v.count));
+                  return sorted.map(([src, val], i) => {
+                    const displayVal = hasRevenue ? val.revenue : val.count;
+                    const pct = maxVal > 0 ? Math.round((displayVal / maxVal) * 100) : 0;
                     return (
                       <div key={src}>
                         <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '0.2rem' }}>
                           <span style={{ fontSize: '0.72rem', color: 'var(--text-primary)' }}>{src}</span>
-                          <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>{formatCurrency(rev)}</span>
+                          <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>
+                            {hasRevenue ? formatCurrency(val.revenue) : `${val.count} projects`}
+                          </span>
                         </div>
                         <div style={{ height: 6, borderRadius: 3, background: 'var(--bg-hover)', overflow: 'hidden' }}>
                           <div style={{ height: '100%', borderRadius: 3, width: `${pct}%`, background: ['#4f46e5', '#059669', '#d97706', '#0ea5e9', '#7c3aed'][i % 5] }} />
@@ -1239,7 +1271,6 @@ const PSProjectQuality = ({ sheets = [], teamConfig = PS_POS_TEAM_CONFIG }) => {
                     );
                   });
                 })()}
-                {totalRevenue === 0 && <p style={{ fontSize: '0.78rem', color: 'var(--text-muted)' }}>No revenue data in sheets.</p>}
               </div>
             </div>
           </div>
@@ -1248,9 +1279,22 @@ const PSProjectQuality = ({ sheets = [], teamConfig = PS_POS_TEAM_CONFIG }) => {
           <div style={{ background: 'var(--bg-card)', borderRadius: '12px', border: '1px solid var(--border-color)', padding: '1rem', marginBottom: '1.25rem' }}>
             <h3 style={{ fontSize: '0.85rem', fontWeight: 600, marginBottom: '0.75rem', color: 'var(--text-primary)' }}>Active Projects Status</h3>
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(240px, 1fr))', gap: '0.75rem' }}>
-              {projects.slice(0, 9).map((p, i) => {
+              {/* Show projects that have a known status first */}
+              {[...knownProjects, ...projects.filter(p => !p.status.trim())].slice(0, 9).map((p, i) => {
                 const sc = statusColor(p.status);
-                const prog = p.progress || Math.round(Math.random() * 40 + 30);
+                // Derive progress from status when no explicit progress column exists
+                const statusProgress = (() => {
+                  const s = (p.status || '').toLowerCase();
+                  if (['done', 'completed', 'delivered', 'went live', 'live'].some(k => s.includes(k))) return 100;
+                  if (['on track'].some(k => s.includes(k))) return 70;
+                  if (['qa', 'under testing', 'testing'].some(k => s.includes(k))) return 75;
+                  if (['development', 'in progress', 'wip', 'frontend dev'].some(k => s.includes(k))) return 50;
+                  if (['needs discussion', 'under discussion'].some(k => s.includes(k))) return 20;
+                  if (['blocked', 'delayed', 'at risk'].some(k => s.includes(k))) return 30;
+                  if (['not yet started', 'not started', 'upcoming', 'planned'].some(k => s.includes(k))) return 5;
+                  return 10;
+                })();
+                const prog = p.progress || statusProgress;
                 return (
                   <div key={i} style={{ padding: '0.75rem', borderRadius: '10px', background: 'var(--bg-hover)', border: '1px solid var(--border-color)' }}>
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.4rem' }}>
@@ -1292,9 +1336,9 @@ const PSProjectQuality = ({ sheets = [], teamConfig = PS_POS_TEAM_CONFIG }) => {
                 <div style={{ padding: '0.6rem 0.75rem', borderRadius: '8px', background: 'linear-gradient(135deg, #2563eb, #3b82f6)' }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', marginBottom: '0.15rem' }}>
                     <CheckCircle size={14} color="#93c5fd" />
-                    <span style={{ fontSize: '0.8rem', fontWeight: 600, color: '#fff' }}>Delivery Rate {projects.length > 0 ? Math.round((completedProjects / projects.length) * 100) : 0}%</span>
+                    <span style={{ fontSize: '0.8rem', fontWeight: 600, color: '#fff' }}>Delivery Rate {knownProjects.length > 0 ? Math.round((completedProjects / knownProjects.length) * 100) : 0}%</span>
                   </div>
-                  <p style={{ fontSize: '0.72rem', color: 'rgba(255,255,255,0.7)', margin: 0 }}>{completedProjects} delivered out of {projects.length} total</p>
+                  <p style={{ fontSize: '0.72rem', color: 'rgba(255,255,255,0.7)', margin: 0 }}>{completedProjects} delivered out of {knownProjects.length} tracked projects</p>
                 </div>
               </div>
             </div>
@@ -1348,11 +1392,13 @@ const PSProjectQuality = ({ sheets = [], teamConfig = PS_POS_TEAM_CONFIG }) => {
 };
 
 // ─── PS TEAM HEALTH & ENGAGEMENT ──────────────────────────────────
-const PSTeamHealth = ({ teamConfig = PS_POS_TEAM_CONFIG }) => {
+const PSTeamHealth = ({ teamConfig = PS_POS_TEAM_CONFIG, departmentId = null }) => {
   const slackCacheKey = `ps_slack_cache_${teamConfig.cacheKeySuffix}`;
   const [tickets, setTickets] = useState([]);
   const [slackMsgs, setSlackMsgs] = useState([]);
   const [slackEngagement, setSlackEngagement] = useState({});
+  // Dept member list — used to filter out cross-team members from other boards
+  const [deptMemberFilter, setDeptMemberFilter] = useState(null); // null = not loaded yet
   const [ticketsLoading, setTicketsLoading] = useState(true);
   const [slackLoading, setSlackLoading] = useState(true);
   const [slackRefreshing, setSlackRefreshing] = useState(false);
@@ -1374,6 +1420,23 @@ const PSTeamHealth = ({ teamConfig = PS_POS_TEAM_CONFIG }) => {
       }
     } catch { }
   }, [slackCacheKey]);
+
+  // Load dept member list so we can filter out cross-team members
+  useEffect(() => {
+    if (!departmentId) return;
+    (async () => {
+      try {
+        const { getDepartmentMembers } = await import('./lib/sheetsApi');
+        const members = await getDepartmentMembers(departmentId);
+        // members: [{ member_name, email, team_id }]
+        const emails = new Set(members.map(m => (m.email || '').toLowerCase()).filter(Boolean));
+        const names  = new Set(members.map(m => (m.member_name || '').toLowerCase()).filter(Boolean));
+        setDeptMemberFilter({ emails, names });
+      } catch {
+        setDeptMemberFilter({ emails: new Set(), names: new Set() }); // on error show all
+      }
+    })();
+  }, [departmentId]);
 
   useEffect(() => {
     if (!DEVREV_TOKEN) { setTicketsLoading(false); return; }
@@ -1498,10 +1561,29 @@ const PSTeamHealth = ({ teamConfig = PS_POS_TEAM_CONFIG }) => {
     return Object.values(map).sort((a, b) => b.active - a.active);
   }, [tickets]);
 
-  const maxWorkload = memberWorkload.length > 0 ? Math.max(...memberWorkload.map(m => m.total)) : 1;
-  const avgWorkload = memberWorkload.length > 0 ? (memberWorkload.reduce((s, m) => s + m.active, 0) / memberWorkload.length).toFixed(1) : 0;
+  // Filter to only this department's members — prevents cross-team ticket assignees
+  // (e.g. a PS-POS member who helped on one PS-Enterprise ticket) from appearing
+  const filteredMemberWorkload = useMemo(() => {
+    const excluded = new Set((teamConfig.excludeMembers || []).map(n => n.toLowerCase()));
+    let result = memberWorkload;
+    // Apply hard-coded exclusion list from team config
+    if (excluded.size > 0) {
+      result = result.filter(m => !excluded.has((m.name || '').toLowerCase()));
+    }
+    // Apply dynamic dept member filter if loaded and non-empty
+    if (deptMemberFilter && (deptMemberFilter.emails.size > 0 || deptMemberFilter.names.size > 0)) {
+      result = result.filter(m =>
+        deptMemberFilter.emails.has((m.email || '').toLowerCase()) ||
+        deptMemberFilter.names.has((m.name || '').toLowerCase())
+      );
+    }
+    return result;
+  }, [memberWorkload, deptMemberFilter, teamConfig]);
+
+  const maxWorkload = filteredMemberWorkload.length > 0 ? Math.max(...filteredMemberWorkload.map(m => m.total)) : 1;
+  const avgWorkload = filteredMemberWorkload.length > 0 ? (filteredMemberWorkload.reduce((s, m) => s + m.active, 0) / filteredMemberWorkload.length).toFixed(1) : 0;
   const totalSlackMentions = slackMsgs.length;
-  const attendance = memberWorkload.length > 0 ? Math.round((memberWorkload.filter(m => m.active > 0).length / memberWorkload.length) * 100) : 0;
+  const attendance = filteredMemberWorkload.length > 0 ? Math.round((filteredMemberWorkload.filter(m => m.active > 0).length / filteredMemberWorkload.length) * 100) : 0;
 
   const getHealthStatus = (m) => {
     const ratio = m.active / maxWorkload;
@@ -1546,11 +1628,11 @@ const PSTeamHealth = ({ teamConfig = PS_POS_TEAM_CONFIG }) => {
         <div style={{ background: 'var(--bg-card)', borderRadius: '12px', border: '1px solid var(--border-color)', padding: '1rem' }}>
           <h3 style={{ fontSize: '0.85rem', fontWeight: 600, marginBottom: '1rem', color: 'var(--text-primary)' }}>Engagement Trends</h3>
           <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
-            {memberWorkload.map((m, i) => {
+            {filteredMemberWorkload.map((m, i) => {
               const slackData = Object.entries(slackEngagement).find(([name]) => name.toLowerCase() === m.name.toLowerCase());
               const slackReplies = slackData ? slackData[1].replies : 0;
               const totalEngagement = m.total + slackReplies;
-              const maxEng = Math.max(...memberWorkload.map(w => {
+              const maxEng = Math.max(...filteredMemberWorkload.map(w => {
                 const sr = Object.entries(slackEngagement).find(([n]) => n.toLowerCase() === w.name.toLowerCase());
                 return w.total + (sr ? sr[1].replies : 0);
               }));
@@ -1581,11 +1663,18 @@ const PSTeamHealth = ({ teamConfig = PS_POS_TEAM_CONFIG }) => {
           ) : Object.keys(slackEngagement).length === 0 ? (
             <p style={{ fontSize: '0.78rem', color: 'var(--text-muted)' }}>No thread replies found in the last 15 days.</p>
           ) : (() => {
-            const teamNames = memberWorkload.map(m => m.name.toLowerCase());
+            const teamNames = filteredMemberWorkload.map(m => m.name.toLowerCase());
             console.log('[Wellbeing] DevRev names:', teamNames, 'Slack names:', Object.keys(slackEngagement));
             const isTeamMember = (name) => {
               const n = name.toLowerCase();
-              return teamNames.some(tn => tn === n || tn.includes(n.split(' ')[0]) || n.includes(tn.split(' ')[0]));
+              return teamNames.some(tn => {
+                if (tn === n) return true;
+                // Only match on words that are at least 3 chars — prevents single initials
+                // like "M" from matching any name containing the letter 'm'
+                const nWords = new Set(n.split(' ').filter(w => w.length >= 3));
+                const tnWords = tn.split(' ').filter(w => w.length >= 3);
+                return tnWords.some(w => nWords.has(w));
+              });
             };
             const teamEntries = Object.entries(slackEngagement)
               .filter(([name]) => {
@@ -1623,7 +1712,7 @@ const PSTeamHealth = ({ teamConfig = PS_POS_TEAM_CONFIG }) => {
       <div style={{ background: 'var(--bg-card)', borderRadius: '12px', border: '1px solid var(--border-color)', padding: '1rem' }}>
         <h3 style={{ fontSize: '0.85rem', fontWeight: 600, marginBottom: '0.75rem', color: 'var(--text-primary)' }}>Team Member Status</h3>
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))', gap: '0.75rem' }}>
-          {memberWorkload.map((m, i) => {
+          {filteredMemberWorkload.map((m, i) => {
             const health = getHealthStatus(m);
             return (
               <div key={i} style={{ padding: '0.75rem', borderRadius: '10px', background: 'var(--bg-hover)', border: '1px solid var(--border-color)' }}>
@@ -1675,8 +1764,8 @@ const PSTeamHealth = ({ teamConfig = PS_POS_TEAM_CONFIG }) => {
                 </span>
               </div>
               <p style={{ fontSize: '0.72rem', color: 'rgba(255,255,255,0.7)', margin: 0 }}>
-                {memberWorkload.filter(m => m.active > 3).length > 0
-                  ? `${memberWorkload.filter(m => m.active > 3).length} member(s) have heavy workload. Consider redistributing.`
+                {filteredMemberWorkload.filter(m => m.active > 3).length > 0
+                  ? `${filteredMemberWorkload.filter(m => m.active > 3).length} member(s) have heavy workload. Consider redistributing.`
                   : `${attendance}% of team is actively engaged this sprint.`}
               </p>
             </div>
@@ -6275,7 +6364,7 @@ function AuthenticatedApp({ onLogout }) {
           })()}
           {view === 'ps-health' && (() => {
             const dept = departments.find(d => d.id === selectedDepartmentId);
-            return <PSTeamHealth teamConfig={getTeamConfig(dept)} />;
+            return <PSTeamHealth teamConfig={getTeamConfig(dept)} departmentId={dept?.id} />;
           })()}
           {view === 'ps-quality' && (() => {
             const dept = departments.find(d => d.id === selectedDepartmentId);
